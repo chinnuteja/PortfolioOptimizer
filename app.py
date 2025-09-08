@@ -4,6 +4,10 @@ from flask_cors import CORS
 import pandas as pd
 import numpy as np
 import logging, os, time, csv
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Project modules
 import config

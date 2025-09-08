@@ -90,7 +90,9 @@ def _call_openrouter(prompt: str) -> str:
     """
     api_key = os.environ.get("OPENROUTER_API_KEY")
     
+    print(f"[DEBUG] OpenRouter API key found: {bool(api_key)}")
     if not api_key:
+        print("[DEBUG] No OpenRouter API key found, using fallback")
         return ""
     
     try:
@@ -130,11 +132,17 @@ def _call_openrouter(prompt: str) -> str:
         return ""
 
 def explain_allocation(payload: Dict[str, Any]) -> str:
+    print("[DEBUG] explain_allocation called")
     try:
         txt = _call_openrouter(_build_prompt(payload))
         if txt and txt.strip():
+            print("[DEBUG] OpenRouter API returned text, using LLM explanation")
             return txt.strip()
-    except Exception:
+        else:
+            print("[DEBUG] OpenRouter API returned empty, using fallback")
+    except Exception as e:
+        print(f"[DEBUG] OpenRouter API failed: {e}, using fallback")
         pass
     # Fallback explanation that always works
+    print("[DEBUG] Using rule-based fallback explanation")
     return _rule_based(payload)
