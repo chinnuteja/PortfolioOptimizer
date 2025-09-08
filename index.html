@@ -159,7 +159,7 @@
       if (inputs.bitcoin.value)  cw["Bitcoin"] = parseFloat(inputs.bitcoin.value);
 
       try {
-        const resp = await fetch('http://127.0.0.1:5000/get_portfolio', {
+        const resp = await fetch('/get_portfolio', {
           method:'POST',
           headers:{'Content-Type':'application/json'},
           body: JSON.stringify({
