@@ -88,7 +88,7 @@ def _call_openrouter(prompt: str) -> str:
     Call OpenRouter API with the provided API key.
     Return None/'' to fall back when key is missing or call fails.
     """
-    api_key = "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"
+    api_key = os.environ.get("OPENROUTER_API_KEY")
     
     if not api_key:
         return ""

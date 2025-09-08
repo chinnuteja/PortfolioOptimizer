@@ -53,10 +53,23 @@ python app.py
 
 ## Configuration
 
+### Environment Variables
+Create a `.env` file (copy from `env.example`):
+```bash
+OPENROUTER_API_KEY=your_api_key_here
+FLASK_ENV=development
+```
+
+### Risk Profiles
 The application uses the following risk profiles:
 - **MinRisk**: Conservative, 30% max per asset, 8% turnover cap
 - **Sharpe**: Balanced, 35% max per asset, 20% turnover cap  
 - **MaxRet**: Aggressive, 40% max per asset, 35% turnover cap
+
+### Security
+- **NEVER commit API keys to version control**
+- Use environment variables for all sensitive data
+- The app will fall back to rule-based explanations if no API key is provided
 
 ## License
 
