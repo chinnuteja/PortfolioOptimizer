@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>PortfolioAI — Results</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body{font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial;}
+  </style>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen">
+  <div class="max-w-6xl mx-auto p-6">
+    <header class="mb-6 flex items-center justify-between">
+      <h1 class="text-3xl font-extrabold">Your Optimized Portfolio</h1>
+      <a href="/" class="text-sm underline text-indigo-300">← back</a>
+    </header>
+
+    <!-- Top: Chart + metrics -->
+    <section class="grid md:grid-cols-2 gap-6">
+      <div class="bg-white/10 border border-white/10 rounded-2xl p-5">
+        <div class="h-72"><canvas id="pie"></canvas></div>
+      </div>
+      <div class="bg-white/10 border border-white/10 rounded-2xl p-5" id="metrics"></div>
+    </section>
+
+    <!-- You vs Recommended -->
+    <section class="mt-6 bg-white/10 border border-white/10 rounded-2xl p-5" id="uvsr"></section>
+
+    <!-- Asset cards -->
+    <section class="mt-6" id="asset-cards"></section>
+
+    <!-- Explain buttons -->
+    <section class="mt-6 flex gap-3">
+      <button id="explain-btn" class="bg-emerald-600 hover:bg-emerald-500 px-6 py-3 rounded-xl font-semibold">
+        Explain this allocation
+      </button>
+      <span id="exp-err" class="text-red-300 hidden"></span>
+    </section>
+
+    <!-- Explanations -->
+    <section class="mt-6" id="explain-panels"></section>
+
+    <footer class="text-xs text-slate-400 mt-10">Disclaimer: Proof of Concept. Not investment advice.</footer>
+  </div>
+
+  <script>
+    const pieCtx = document.getElementById('pie');
+    const metricsDiv = document.getElementById('metrics');
+    const uvsrDiv = document.getElementById('uvsr');
+    const cardsDiv = document.getElementById('asset-cards');
+    const panelsDiv = document.getElementById('explain-panels');
+    const explainBtn = document.getElementById('explain-btn');
+    const expErr = document.getElementById('exp-err');
+    let pieChart = null;
+
+    function readState() {
+      const input = JSON.parse(localStorage.getItem("pe.input") || "{}");
+      const resp  = JSON.parse(localStorage.getItem("pe.lastResponse") || "{}");
+      const jobId = JSON.parse(localStorage.getItem("pe.jobId") || "null");
+      return {input, resp, jobId};
+    }
+
+    function renderTop(resp) {
+      const weights = resp.weights_target_anchored_pct || resp.weights_target_model_pct || {};
+      const labels = Object.keys(weights);
+      const values = Object.values(weights).map(v => +v);
+
+      if (pieChart) pieChart.destroy();
+      pieChart = new Chart(pieCtx, {
+        type: 'doughnut',
+        data: { labels, datasets:[{ data: values, borderColor:'#0f172a', borderWidth:4,
+                 backgroundColor:['#6366F1','#22C55E','#F59E0B','#EF4444','#14B8A6','#A78BFA'] }] },
+        options: { responsive:true, maintainAspectRatio:false, plugins:{ legend:{ position:'bottom', labels:{ color:'#E2E8F0'} }}, cutout:'68%' }
+      });
+
+      const perf = resp.performance || {};
+      metricsDiv.innerHTML = `
+        <div class="text-lg font-semibold mb-3">Expected Performance</div>
+        ${Object.entries(perf).map(([k,v])=>`
+          <div class="flex justify-between py-1 border-b border-white/10"><span class="text-slate-300">${k}</span><span class="font-semibold">${v}</span></div>
+        `).join('')}
+        <div class="mt-3 text-sm text-slate-400">Risk profile used: <b>${resp.risk_profile_used || '—'}</b></div>
+      `;
+    }
+
+    function renderUvsR(input, resp) {
+      const cur = input.current_weights || {};
+      const rec = resp.weights_target_anchored_pct || resp.weights_target_model_pct || {};
+      const assets = Array.from(new Set([...Object.keys(rec), ...Object.keys(cur)]));
+
+      uvsrDiv.innerHTML = `
+        <div class="text-xl font-semibold mb-3">You vs Recommended</div>
+        <div class="grid grid-cols-12 text-sm border-b border-white/10 pb-2 mb-2">
+          <div class="col-span-4 text-slate-300">Asset</div>
+          <div class="col-span-4 text-slate-300">You (Current %)</div>
+          <div class="col-span-4 text-slate-300">Recommended %</div>
+        </div>
+        ${assets.map(a=>{
+          const c = +(cur[a]||0).toFixed(2);
+          const r = +(rec[a]||0).toFixed(2);
+          const delta = (r - c).toFixed(2);
+          const sign = (r-c)>=0?'+':'';
+          return `
+            <div class="grid grid-cols-12 py-2 border-b border-white/5">
+              <div class="col-span-4">${a}</div>
+              <div class="col-span-4">${c}%</div>
+              <div class="col-span-2">${r}%</div>
+              <div class="col-span-2 ${+delta>=0?'text-emerald-400':'text-red-400'}">${sign}${delta} pp</div>
+            </div>
+          `;
+        }).join('')}
+      `;
+    }
+
+    function renderCards(resp) {
+      const rec = resp.weights_target_anchored_pct || resp.weights_target_model_pct || {};
+      const assets = Object.keys(rec).filter(a => rec[a] > 0.0);
+      if (assets.length === 0) { cardsDiv.innerHTML = ''; return; }
+
+      cardsDiv.innerHTML = `
+        <div class="grid md:grid-cols-4 gap-4">
+          ${assets.map(a=>`
+            <div class="bg-white/10 border border-white/10 rounded-2xl p-4">
+              <div class="text-slate-300 text-sm">${a}</div>
+              <div class="text-3xl font-extrabold mt-1">${(+rec[a]).toFixed(2)}%</div>
+              <button data-asset="${a}" class="view-details mt-3 text-sm underline text-indigo-300">View details</button>
+            </div>
+          `).join('')}
+        </div>
+      `;
+
+      // set up scroll-to panels
+      cardsDiv.querySelectorAll('.view-details').forEach(btn=>{
+        btn.addEventListener('click', ()=>{
+          const el = document.getElementById(`panel-${btn.dataset.asset}`);
+          if (el) el.scrollIntoView({behavior:'smooth', block:'start'});
+        });
+      });
+    }
+
+    function mapProfileToHuman(p) {
+      if (!p) return 'Balanced';
+      const s = p.toLowerCase();
+      if (s.includes('min')) return 'Conservative';
+      if (s.includes('max')) return 'Aggressive';
+      if (s.includes('custom')) return 'Custom';
+      return 'Balanced';
+    }
+
+    async function callExplain(input, resp, jobId) {
+      const payload = {
+        job_id: jobId,  // must be non-null for the explainer
+        current_portfolio: input.current_weights || {},
+        optimized_portfolio: resp.weights_target_anchored_pct || resp.weights_target_model_pct || {},
+        risk_profile: mapProfileToHuman(resp.risk_profile_used)
+      };
+      // basic guard
+      if (!payload.job_id) throw new Error("KPI job id missing in /get_portfolio response.");
+
+      const r = await fetch('/explain', {
+        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
+      });
+      if (!r.ok) {
+        const e = await r.json().catch(()=>({error:`HTTP ${r.status}`}));
+        throw new Error(e.error || `HTTP ${r.status}`);
+      }
+      return await r.json();
+    }
+
+    function renderExplainPanels(explainJson) {
+      const pa = (((explainJson||{}).explanation||{}).portfolio_analysis)||{};
+      const assets = pa.assets || {};
+      const order = Object.keys(assets);
+
+      // table already shown above; here build detailed panels
+      panelsDiv.innerHTML = `
+        <div class="text-2xl font-semibold mb-3">3) Explanation</div>
+        <div class="grid gap-4">
+          ${order.map(a=>{
+            const node = assets[a]||{};
+            const hist = node.historical_returns||{};
+            const risk = node.risk_metrics||{};
+            const km   = node.key_market_data||{};
+            const cur  = node.current_stats||{};
+            return `
+              <div id="panel-${a}" class="bg-white/10 border border-white/10 rounded-2xl p-5">
+                <div class="flex items-center justify-between mb-2">
+                  <div class="text-xl font-semibold">${a}</div>
+                  <div class="text-slate-300 text-sm">Recommended: <b>${(node.allocation_pct??0).toFixed?.(2) || node.allocation_pct || '—'}%</b></div>
+                </div>
+                <p class="text-slate-300 mb-3">${node.explanation || '—'}</p>
+                <div class="grid md:grid-cols-3 gap-4 text-sm">
+                  <div class="bg-white/5 border border-white/10 rounded-lg p-3">
+                    <div class="font-semibold mb-1">Historical Returns</div>
+                    ${Object.entries(hist).map(([k,v])=>`<div class="flex justify-between"><span class="text-slate-400">${k}</span><span>${v}</span></div>`).join('')}
+                  </div>
+                  <div class="bg-white/5 border border-white/10 rounded-lg p-3">
+                    <div class="font-semibold mb-1">Risk Metrics</div>
+                    ${Object.entries(risk).map(([k,v])=>`<div class="flex justify-between"><span class="text-slate-400">${k}</span><span>${v}</span></div>`).join('')}
+                  </div>
+                  <div class="bg-white/5 border border-white/10 rounded-lg p-3">
+                    <div class="font-semibold mb-1">Key Indicators</div>
+                    ${Object.entries(km).map(([k,v])=>`<div class="flex justify-between"><span class="text-slate-400">${k}</span><span>${v}</span></div>`).join('')}
+                  </div>
+                </div>
+              </div>
+            `;
+          }).join('')}
+          <div class="bg-white/10 border border-white/10 rounded-2xl p-5">
+            <div class="text-xl font-semibold mb-2">Portfolio Rationale</div>
+            <p class="text-slate-300">${pa.allocation_rationale || (pa.overall_explanation || '—')}</p>
+          </div>
+        </div>
+      `;
+    }
+
+    // --------- bootstrap ---------
+    (function init(){
+      const {input, resp, jobId} = readState();
+      if (!resp || !resp.weights_target_anchored_pct) {
+        // nothing in storage → bounce back
+        window.location.href = "/";
+        return;
+      }
+      renderTop(resp);
+      renderUvsR(input, resp);
+      renderCards(resp);
+
+      explainBtn.addEventListener('click', async ()=>{
+        expErr.classList.add('hidden');
+        try {
+          const ex = await callExplain(input, resp, jobId);
+          renderExplainPanels(ex);
+        } catch(e){
+          expErr.textContent = e.message || 'Explain failed';
+          expErr.classList.remove('hidden');
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
