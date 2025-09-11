@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Explanation — portfolio_enhancer</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, 'Helvetica Neue', Arial; }
+    @import url('https://rsms.me/inter/inter.css');
+  </style>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-slate-100">
+  <div class="max-w-6xl mx-auto p-4 md:p-8">
+    <!-- Header -->
+    <header class="mb-6">
+      <div class="rounded-3xl bg-white/10 backdrop-blur border border-white/10 p-6 md:p-8 shadow-xl">
+        <div class="flex items-center justify-between flex-wrap gap-3">
+          <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">Explanation</h1>
+          <span id="asof" class="text-xs md:text-sm px-3 py-1 rounded-full bg-white/10 border border-white/10 text-slate-300"></span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Loading -->
+    <div id="loading" class="rounded-3xl bg-white/10 backdrop-blur border border-white/10 p-10 text-center shadow-xl">
+      <div class="animate-spin rounded-full h-14 w-14 border-b-4 border-indigo-400 mx-auto"></div>
+      <p class="mt-4 text-slate-300">Generating explanation…</p>
+    </div>
+
+    <!-- Error -->
+    <div id="error" class="hidden bg-red-500/20 border border-red-400 text-red-100 px-4 py-3 rounded-2xl mb-6"></div>
+
+    <!-- Cards -->
+    <section id="cards" class="hidden grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8"></section>
+
+    <!-- Analysis -->
+    <section id="analysis" class="hidden rounded-3xl bg-white/10 backdrop-blur border border-white/10 p-6 md:p-8 shadow-xl">
+      <div class="flex items-center justify-between mb-6">
+        <h2 id="asset-title" class="text-2xl font-semibold">Asset Class Analysis</h2>
+        <div id="asset-alloc" class="text-2xl font-extrabold"></div>
+      </div>
+
+      <!-- NEW LAYOUT: left column stacks Historical + Risk, right side is Key Indicators spanning 2 cols -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6 items-start">
+        <!-- Left column (stacked cards) -->
+        <div class="flex flex-col gap-6 order-2 md:order-1">
+          <div class="bg-white/5 border border-white/10 rounded-2xl p-4">
+            <h3 class="text-slate-200 font-semibold mb-2">Historical Returns</h3>
+            <div id="hist" class="divide-y divide-white/10">
+              <!-- rows injected -->
+            </div>
+          </div>
+
+          <div class="bg-white/5 border border-white/10 rounded-2xl p-4">
+            <h3 class="text-slate-200 font-semibold mb-2">Risk Metrics</h3>
+            <div id="risk" class="divide-y divide-white/10">
+              <!-- rows injected -->
+            </div>
+          </div>
+        </div>
+
+        <!-- Key Indicators spanning two columns -->
+        <div class="bg-white/5 border border-white/10 rounded-2xl p-4 md:col-span-2 order-1 md:order-2">
+          <h3 class="text-slate-200 font-semibold mb-2">Key Indicators</h3>
+          <div id="indicators" class="text-sm">
+            <!-- tidy two-column dl injected -->
+          </div>
+        </div>
+      </div>
+
+      <div class="mt-6 bg-white/5 rounded-2xl p-4 border border-white/10">
+        <p id="asset-expl" class="text-sm text-slate-200 leading-6"></p>
+      </div>
+    </section>
+
+    <!-- Rationale -->
+    <section id="rationale-wrap" class="hidden rounded-3xl bg-white/10 backdrop-blur border border-white/10 p-6 md:p-8 mt-8 shadow-xl">
+      <h3 class="text-xl font-semibold mb-2">Portfolio Rationale</h3>
+      <p id="rationale" class="text-sm text-slate-200 leading-6"></p>
+    </section>
+  </div>
+
+  <script>
+    const loadingEl = document.getElementById('loading');
+    const errorEl   = document.getElementById('error');
+    const cardsEl   = document.getElementById('cards');
+    const analysisEl= document.getElementById('analysis');
+    const rationaleWrap = document.getElementById('rationale-wrap');
+
+    const assetTitle = document.getElementById('asset-title');
+    const assetAlloc = document.getElementById('asset-alloc');
+    const histEl = document.getElementById('hist');
+    const indEl  = document.getElementById('indicators');
+    const riskEl = document.getElementById('risk');
+    const assetExpl = document.getElementById('asset-expl');
+    const rationale = document.getElementById('rationale');
+    const asof = document.getElementById('asof');
+
+    let lastReco = null;
+    try { lastReco = JSON.parse(sessionStorage.getItem('portfolio_lastReco') || 'null'); } catch(e){}
+
+    const statRow = (label, value) => `
+      <div class="flex items-center justify-between py-2">
+        <span class="text-slate-300">${label}</span>
+        <span class="font-semibold">${value}</span>
+      </div>`;
+
+    const fmtPct = x => `${(+x).toFixed(2)}%`;
+    const titleize = s => s.replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase());
+
+    // Pretty two-column layout for Key Indicators
+    function renderIndicators(km){
+      if (!km || Object.keys(km).length === 0) return `<div class="text-slate-400">—</div>`;
+      const labelMap = {
+        global_context: 'Global Context',
+        institutional_flows: 'Institutional Flows',
+        market_levels: 'Market Levels',
+        policy_metrics: 'Policy Metrics',
+        sentiment_indicators: 'Sentiment Indicators',
+        flow_analysis: 'Flow Analysis',
+        funding_metrics: 'Funding Metrics',
+        liquidity_data: 'Liquidity',
+        price_momentum: 'Price Momentum',
+        currency_data: 'Currency',
+        yield_analysis: 'Yield Analysis',
+        valuation_metrics: 'Valuation Metrics',
+        property_fundamentals: 'Property Fundamentals',
+        market_activity: 'Market Activity'
+      };
+      return Object.entries(km).map(([k,v]) => {
+        const label = labelMap[k] || titleize(k);
+        const val = (v === null || v === undefined) ? '—' : String(v);
+        return `
+          <div class="grid grid-cols-[160px_1fr] gap-x-4 items-start py-3 border-b border-white/10 last:border-0">
+            <div class="text-slate-300">${label}</div>
+            <div class="font-semibold leading-relaxed text-slate-100 break-words">${val}</div>
+          </div>`;
+      }).join('');
+    }
+
+    async function callExplain(payload){
+      const resp = await fetch('/explain', {
+        method:'POST',
+        headers:{'Content-Type':'application/json', 'Cache-Control':'no-store'},
+        body: JSON.stringify(payload)
+      });
+      let json = null;
+      try { json = await resp.json(); } catch(e){}
+      return { status: resp.status, body: json };
+    }
+
+    async function run() {
+      if (!lastReco) {
+        loadingEl.classList.add('hidden');
+        errorEl.textContent = 'No recent recommendation found. Please go back and click “Explain this allocation”.';
+        errorEl.classList.remove('hidden');
+        return;
+      }
+      const basePayload = {
+        job_id: lastReco.jobId || null,
+        current_weights: lastReco.currentWeights || {},
+        final_weights: lastReco.finalWeights || {},
+        risk_profile_used: lastReco.profileUsed || 'Balanced'
+      };
+
+      // Poll if explainer is still preparing fresh KPIs
+      let attempts = 0, MAX = 60;
+      while (attempts < MAX) {
+        attempts++;
+        const { status, body } = await callExplain(basePayload);
+        if (status === 202 || (body && body.status === 'pending')) {
+          await new Promise(r => setTimeout(r, Math.min(2000 + attempts*1500, 7000)));
+          continue;
+        }
+        loadingEl.classList.add('hidden');
+        if (!body || body.status === 'error') {
+          errorEl.textContent = (body && (body.message || body.error)) || 'Could not generate explanation.';
+          errorEl.classList.remove('hidden');
+          return;
+        }
+        render(body);
+        return;
+      }
+      loadingEl.classList.add('hidden');
+      errorEl.textContent = 'Still preparing fresh metrics. Please wait a moment and click Refresh.';
+      errorEl.classList.remove('hidden');
+    }
+
+    function render(apiResp){
+      const pa = apiResp?.explanation?.portfolio_analysis || {};
+      const assets = pa.assets || {};
+      const order = ["Gold","Equities","REITs","Bitcoin"].filter(a => assets[a]);
+
+      const ts = apiResp?.metadata?.timestamp || null;
+      if (ts) asof.textContent = `As of ${ts}`;
+
+      // Cards with ▲/▼ delta
+      cardsEl.innerHTML = order.map(a => {
+        const rec = assets[a]?.allocation_pct ?? (lastReco.finalWeights?.[a] ?? 0);
+        const cur = lastReco.currentWeights?.[a] ?? 0;
+        const delta = (+rec) - (+cur);
+        const up = delta > 0;
+        const arrow = up ? '▲' : (delta < 0 ? '▼' : '—');
+        const arrowClr = up ? 'text-emerald-400' : (delta < 0 ? 'text-rose-400' : 'text-slate-400');
+        return `
+          <button data-asset="${a}"
+                  class="asset-card text-left rounded-2xl bg-white/10 backdrop-blur border border-white/10 p-4 hover:bg-white/15 transition shadow-lg">
+            <div class="flex items-center justify-between">
+              <div class="text-lg font-semibold">${a}</div>
+              <div class="text-sm ${arrowClr} font-semibold">${arrow} ${delta===0? '0.00' : Math.abs(delta).toFixed(2)} pp</div>
+            </div>
+            <div class="mt-4 text-4xl font-extrabold">${fmtPct(rec)}</div>
+            <div class="mt-1 text-slate-300 text-sm">Recommended allocation</div>
+            <div class="mt-4 w-full text-center rounded-lg bg-slate-900/50 border border-white/10 py-2">View Details</div>
+          </button>
+        `;
+      }).join('');
+      cardsEl.classList.remove('hidden');
+
+      if (order.length) showAsset(order[0], assets);
+      rationale.textContent = pa.allocation_rationale || '—';
+      document.getElementById('rationale-wrap').classList.remove('hidden');
+
+      cardsEl.querySelectorAll('.asset-card').forEach(btn => {
+        btn.addEventListener('click', () => showAsset(btn.dataset.asset, assets));
+      });
+    }
+
+    function showAsset(a, assets) {
+      const node = assets[a] || {};
+      assetTitle.textContent = a;
+      const rec = node.allocation_pct ?? (lastReco.finalWeights?.[a] ?? 0);
+      assetAlloc.textContent = fmtPct(rec);
+
+      const hr = node.historical_returns || {};
+      histEl.innerHTML =
+        (hr["1_year"]       ? statRow("1 Year", hr["1_year"]) : "") +
+        (hr["5_years_avg"]  ? statRow("5 Years (Avg)", hr["5_years_avg"]) : "") +
+        (hr["10_years_avg"] ? statRow("10 Years (Avg)", hr["10_years_avg"]) : "") ||
+        `<div class="text-slate-400 py-2">—</div>`;
+
+      const km = node.key_market_data || {};
+      indEl.innerHTML = renderIndicators(km);
+
+      const rm = node.risk_metrics || {};
+      riskEl.innerHTML =
+        (rm["volatility"]   ? statRow("Volatility", rm["volatility"]) : "") +
+        (rm["max_drawdown"] ? statRow("Max Drawdown", rm["max_drawdown"]) : "") +
+        (rm["sharpe_ratio"] ? statRow("Sharpe Ratio", rm["sharpe_ratio"]) : "") +
+        (rm["var_95"]       ? statRow("VaR (95%)", rm["var_95"]) : "") ||
+        `<div class="text-slate-400 py-2">—</div>`;
+
+      assetExpl.textContent = node.explanation || '—';
+      analysisEl.classList.remove('hidden');
+    }
+
+    run();
+  </script>
+</body>
+</html>

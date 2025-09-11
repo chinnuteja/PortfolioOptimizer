@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>portfolio_enhancer – Intelligent Portfolio Optimizer</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, 'Helvetica Neue', Arial; }
+    @import url('https://rsms.me/inter/inter.css');
+  </style>
+</head>
+<body class="bg-white text-slate-800 min-h-screen">
+  <div class="container mx-auto p-4 md:p-8 max-w-5xl">
+    <header class="mb-8">
+      <div class="rounded-3xl bg-white border border-slate-200 p-6 md:p-8 shadow-sm">
+        <h1 class="text-4xl md:text-5xl font-extrabold tracking-tight text-slate-900">portfolio_enhancer</h1>
+        <p class="text-slate-600 mt-2 text-lg">AI-Powered Portfolio Recommendation Engine</p>
+      </div>
+    </header>
+
+    <main class="grid grid-cols-1 gap-6">
+      <section class="rounded-3xl bg-white border border-slate-200 p-6 md:p-8 shadow-sm">
+        <h2 class="text-2xl font-semibold mb-4 text-slate-900">1) Your Preferences</h2>
+
+        <div class="flex flex-col md:flex-row items-center gap-4">
+          <select id="risk-profile" class="w-full md:w-1/2 p-3 rounded-lg bg-white border border-slate-300">
+            <option value="MinRisk">Conservative (Minimize Risk)</option>
+            <option value="Sharpe" selected>Balanced (Max Risk-Adjusted Return)</option>
+            <option value="MaxRet">Aggressive (Maximize Returns)</option>
+            <option value="Custom">Custom</option>
+          </select>
+
+          <div class="flex-1">
+            <label class="block text-sm text-slate-600 mb-1">Custom Risk Preference</label>
+            <input id="risk-slider" type="range" min="0" max="100" value="50" class="w-full accent-indigo-500">
+            <div class="text-xs text-slate-500 flex justify-between">
+              <span>Conservative</span>
+              <span id="risk-slider-value" class="font-semibold text-slate-700">50</span>
+              <span>Aggressive</span>
+            </div>
+          </div>
+
+          <button id="get-reco-btn"
+                  class="w-full md:w-auto bg-indigo-600 text-white font-semibold rounded-xl px-6 py-3 shadow hover:bg-indigo-500">
+            Get Recommendation
+          </button>
+        </div>
+
+        <div class="mt-6">
+          <label class="block text-sm text-slate-600 mb-1">Your Current Portfolio (%)</label>
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div><label class="text-xs text-slate-500">Gold</label>
+              <input id="cw-gold" type="number" step="0.01" min="0" max="100"
+                     class="w-full rounded-xl bg-white border border-slate-300 p-3"
+                     placeholder="e.g., 40"/>
+            </div>
+            <div><label class="text-xs text-slate-500">Equities</label>
+              <input id="cw-equities" type="number" step="0.01" min="0" max="100"
+                     class="w-full rounded-xl bg-white border border-slate-300 p-3"
+                     placeholder="e.g., 30"/>
+            </div>
+            <div><label class="text-xs text-slate-500">REITs</label>
+              <input id="cw-reits" type="number" step="0.01" min="0" max="100"
+                     class="w-full rounded-xl bg-white border border-slate-300 p-3"
+                     placeholder="e.g., 10"/>
+            </div>
+            <div><label class="text-xs text-slate-500">Bitcoin</label>
+              <input id="cw-bitcoin" type="number" step="0.01" min="0" max="100"
+                     class="w-full rounded-xl bg-white border border-slate-300 p-3"
+                     placeholder="e.g., 20"/>
+            </div>
+          </div>
+          <p class="text-xs text-slate-500 mt-2">Leave blank if you hold none — we’ll treat missing values as 0% and normalize if needed.</p>
+        </div>
+
+        <h3 class="text-xl font-semibold mt-8 mb-3 text-slate-900">2) Choose Your Assets</h3>
+        <p class="text-sm text-slate-600 mb-2">Uncheck to exclude an asset entirely.</p>
+        <div id="asset-choices" class="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <label class="flex items-center gap-2 bg-white border border-slate-300 rounded-lg px-3 py-2">
+            <input type="checkbox" class="asset-toggle accent-indigo-600" value="Gold" checked><span>Gold</span>
+          </label>
+          <label class="flex items-center gap-2 bg-white border border-slate-300 rounded-lg px-3 py-2">
+            <input type="checkbox" class="asset-toggle accent-indigo-600" value="Equities" checked><span>Equities</span>
+          </label>
+          <label class="flex items-center gap-2 bg-white border border-slate-300 rounded-lg px-3 py-2">
+            <input type="checkbox" class="asset-toggle accent-indigo-600" value="REITs" checked><span>REITs</span>
+          </label>
+          <label class="flex items-center gap-2 bg-white border border-slate-300 rounded-lg px-3 py-2">
+            <input type="checkbox" class="asset-toggle accent-indigo-600" value="Bitcoin" checked><span>Bitcoin</span>
+          </label>
+        </div>
+
+        <div class="flex gap-3 mt-4">
+          <button id="download-csv-btn" disabled
+                  class="bg-white text-slate-700 font-semibold rounded-xl px-6 py-3 border border-slate-300 opacity-50 cursor-not-allowed">
+            Download CSV
+          </button>
+        </div>
+      </section>
+
+      <section class="rounded-3xl bg-white border border-slate-200 p-6 md:p-8 shadow-sm">
+        <h2 class="text-2xl font-semibold mb-4 text-slate-900">2) Optimized Portfolio</h2>
+
+        <div id="loading" class="hidden text-center py-8">
+          <div class="animate-spin rounded-full h-12 w-12 border-b-4 border-indigo-500 mx-auto"></div>
+          <p class="mt-3 text-slate-600">Crunching numbers…</p>
+        </div>
+
+        <div id="error" class="hidden bg-rose-50 border border-rose-200 text-rose-700 px-4 py-3 rounded-xl mb-4"></div>
+
+        <div id="content" class="hidden grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
+          <div class="w-full h-72"><canvas id="portfolio-chart"></canvas></div>
+          <div class="space-y-6">
+            <div id="weights-table" class="bg-slate-50 rounded-xl p-4 border border-slate-200"></div>
+            <div id="performance-table" class="bg-slate-50 rounded-xl p-4 border border-slate-200"></div>
+
+            <div class="bg-slate-50 rounded-xl p-4 border border-slate-200">
+              <div class="flex items-center justify-between">
+                <h3 class="font-semibold text-slate-900">Why this allocation (quick)</h3>
+                <button id="explain-btn"
+                        class="bg-emerald-600 text-white font-semibold rounded-lg px-4 py-2 hover:bg-emerald-500">
+                  Explain this allocation
+                </button>
+              </div>
+              <p id="narrative" class="text-sm text-slate-700 mt-2"></p>
+              <p id="explain-error" class="hidden text-rose-600 text-sm mt-2"></p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <footer class="text-center text-sm text-slate-500">
+        Disclaimer: Proof of Concept. Not investment advice.
+      </footer>
+    </main>
+  </div>
+
+  <script>
+    const riskProfileSel = document.getElementById('risk-profile');
+    const riskSlider = document.getElementById('risk-slider');
+    const riskSliderVal = document.getElementById('risk-slider-value');
+    const getBtn = document.getElementById('get-reco-btn');
+    const explainBtn = document.getElementById('explain-btn');
+
+    const inputs = {
+      Gold:     document.getElementById('cw-gold'),
+      Equities: document.getElementById('cw-equities'),
+      REITs:    document.getElementById('cw-reits'),
+      Bitcoin:  document.getElementById('cw-bitcoin'),
+    };
+
+    const loading = document.getElementById('loading');
+    const errorEl = document.getElementById('error');
+    const content = document.getElementById('content');
+    const dl = document.getElementById('download-csv-btn');
+
+    let chartRef = null;
+    let lastReco = null; // { jobId, finalWeights, profileUsed, currentWeights }
+
+    const presetToSlider = { MinRisk:0, Sharpe:50, MaxRet:100 };
+    riskProfileSel.addEventListener('change', () => {
+      const val = riskProfileSel.value;
+      if (val !== 'Custom') { riskSlider.value = presetToSlider[val]; riskSliderVal.textContent = riskSlider.value; }
+    });
+    riskSlider.addEventListener('input', () => {
+      riskSliderVal.textContent = riskSlider.value;
+      if (riskProfileSel.value !== 'Custom') riskProfileSel.value = 'Custom';
+    });
+
+    function getCurrentWeightsPct() {
+      const m = {};
+      ["Gold","Equities","REITs","Bitcoin"].forEach(a => {
+        const v = parseFloat(inputs[a].value);
+        if (!isNaN(v) && v >= 0) m[a] = v; else m[a] = 0.0;
+      });
+      const sum = Object.values(m).reduce((s,x)=>s+x,0);
+      if (sum > 0) Object.keys(m).forEach(k => m[k] = +(m[k] / sum * 100).toFixed(2));
+      return m;
+    }
+
+    function getDisabledAssets() {
+      const arr = [];
+      document.querySelectorAll('.asset-toggle').forEach(cb => { if (!cb.checked) arr.push(cb.value); });
+      return arr;
+    }
+
+    getBtn.addEventListener('click', async () => {
+      errorEl.classList.add('hidden');
+      document.getElementById('explain-error').classList.add('hidden'); // hide explain error on new request
+      content.classList.add('hidden');
+      loading.classList.remove('hidden');
+      dl.disabled = true; dl.classList.add('opacity-50','cursor-not-allowed');
+      lastReco = null; // Reset last recommendation
+
+      const current = getCurrentWeightsPct();
+      const disabled = getDisabledAssets();
+
+      const payload = (riskProfileSel.value === 'Custom')
+        ? { risk_profile:'Sharpe', risk_slider: parseInt(riskSlider.value,10), current_weights: current, disabled_assets: disabled, export_csv: true }
+        : { risk_profile: riskProfileSel.value, risk_slider: presetToSlider[riskProfileSel.value], current_weights: current, disabled_assets: disabled, export_csv: true };
+
+      try {
+        const resp = await fetch('/get_portfolio', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+        const data = await resp.json();
+        if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
+
+        lastReco = {
+          jobId: data.kpis_job_id || null,
+          finalWeights: data.weights_target_anchored_pct || data.weights_target_model_pct || {},
+          profileUsed: data.risk_profile_used || 'Balanced',
+          currentWeights: current
+        };
+
+        renderRecommendation(data);
+
+      } catch (e) {
+        errorEl.textContent = e.message || 'Unknown error'; errorEl.classList.remove('hidden');
+      } finally {
+        loading.classList.add('hidden');
+      }
+    });
+
+    function renderRecommendation(data) {
+      content.classList.remove('hidden');
+
+      const weights = data.weights_target_anchored_pct || data.weights_target_model_pct || {};
+      const perf    = data.performance || {};
+      const narrative = data.narrative || '';
+
+      const wt = document.getElementById('weights-table');
+      wt.innerHTML = `<div class="text-lg font-semibold mb-2 text-slate-900">Target Allocation</div>` +
+        Object.entries(weights).map(([k,v]) =>
+          `<div class="flex justify-between py-1 border-b border-slate-200"><span>${k}</span><span class="font-semibold text-slate-900">${(+v).toFixed(2)}%</span></div>`
+        ).join('');
+
+      const pt = document.getElementById('performance-table');
+      pt.innerHTML = `<div class="text-lg font-semibold mb-2 text-slate-900">Performance</div>` +
+        Object.entries(perf).map(([k,v]) =>
+          `<div class="flex justify-between py-1"><span class="text-slate-600">${k}</span><span class="font-semibold text-slate-900">${v}</span></div>`
+        ).join('');
+
+      document.getElementById('narrative').textContent = narrative;
+
+      const labels = Object.keys(weights);
+      const values = Object.values(weights).map(x => +x);
+      if (chartRef) chartRef.destroy();
+      chartRef = new Chart(document.getElementById('portfolio-chart'), {
+        type:'doughnut',
+        data:{ labels, datasets:[{ data: values, backgroundColor:['#4F46E5','#16A34A','#F59E0B','#EF4444'], borderColor:'#ffffff', borderWidth:4 }] },
+        options:{ responsive:true, maintainAspectRatio:false, plugins:{ legend:{ position:'bottom', labels:{ color:'#0f172a' } } }, cutout:'68%' }
+      });
+
+      if (data.csv_download_url) {
+        dl.disabled = false; dl.classList.remove('opacity-50','cursor-not-allowed');
+        dl.onclick = () => window.open(data.csv_download_url, '_blank');
+      }
+    }
+
+    document.getElementById('explain-btn').addEventListener('click', () => {
+        if (!lastReco) {
+          const exErr = document.getElementById('explain-error');
+          exErr.textContent = 'Please get a recommendation first.'; 
+          exErr.classList.remove('hidden');
+          return;
+        }
+        // put lastReco into sessionStorage and open the new tab
+        sessionStorage.setItem('portfolio_lastReco', JSON.stringify(lastReco));
+        window.open('/explain.html', '_blank');
+    });
+  </script>
+</body>
+</html>
