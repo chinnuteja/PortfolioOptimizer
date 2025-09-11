@@ -38,7 +38,7 @@ Thumbs.db
 
 # Project specific
 exports/
-*.csv
+
 *.log
 
 # Environment variables
