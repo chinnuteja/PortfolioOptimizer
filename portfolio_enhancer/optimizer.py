@@ -7,7 +7,6 @@ import pandas as pd
 import logging
 from typing import Tuple
 from pypfopt import EfficientFrontier, risk_models
-from pypfopt.exceptions import OptimizationError
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +15,9 @@ WINSOR_STD_MULT = 8.0
 COV_REG_EPS = 1e-8
 MAX_ANNUAL_RET = 4.0        # cap annual expected returns to ±400%
 DEFAULT_BTC_SOFT_CAP = 0.35 # gentle BTC cap inside EF (profiles enforce later too)
+
+# New: absolute cap for DAILY returns (final safety)
+DAILY_RET_ABS_CAP = 1.0     # ±100% per day cap; set 0.6 for ±60% if you prefer
 
 # ----------------- Cleaning helpers -----------------
 def _force_numeric(df: pd.DataFrame) -> pd.DataFrame:
@@ -40,11 +42,20 @@ def _winsorize(df: pd.DataFrame, mult=WINSOR_STD_MULT) -> pd.DataFrame:
         df_w[c] = col.clip(lower=low, upper=high)
     return df_w
 
+def _hard_clip_daily(df: pd.DataFrame, abs_cap: float = DAILY_RET_ABS_CAP) -> pd.DataFrame:
+    """Final safety clamp: clip daily returns to [-abs_cap, +abs_cap]."""
+    if abs_cap is None:
+        return df
+    return df.clip(lower=-abs_cap, upper=abs_cap)
+
 def _safe_covariance_annual(df_daily: pd.DataFrame) -> pd.DataFrame:
     """
     Ledoit–Wolf shrinkage on daily returns (fallback to sample cov), then
     add a tiny ridge and annualize by 252.
     """
+    # Paranoid: ensure no non-finite rows before shrinkage
+    df_daily = df_daily.replace([np.inf, -np.inf], np.nan).dropna(how="any")
+
     try:
         S_daily = risk_models.CovarianceShrinkage(df_daily).ledoit_wolf()
     except Exception as e:
@@ -88,7 +99,7 @@ def get_optimal_portfolio(
     """
     logger.info("get_optimal_portfolio(): objective=%s", objective)
 
-    # 1) Clean & winsorize
+    # 1) Clean & winsorize + hard daily clamp
     df_num = _force_numeric(returns_df)
     if df_num.empty:
         logger.error("returns_df empty after cleaning; equal-weight fallback")
@@ -97,6 +108,7 @@ def get_optimal_portfolio(
         return pd.DataFrame.from_dict(ew, orient="index", columns=["Weight"]), (0, 0, 0)
 
     df_clean = _winsorize(df_num)
+    df_clean = _hard_clip_daily(df_clean, DAILY_RET_ABS_CAP)
 
     # 2) Annualized covariance
     S_ann = _safe_covariance_annual(df_clean)
@@ -124,11 +136,10 @@ def get_optimal_portfolio(
 
         elif obj in ("maxret", "max_ret", "maxreturn"):
             # Stable aggressive target: small positive risk aversion
-            # keeps the problem well-posed and still return-seeking.
             try:
                 ef.max_quadratic_utility(risk_aversion=0.05)  # 0.03–0.10 works well
             except Exception:
-                # Fallback: aim for a high feasible return on the frontier
+                # Fallback: high feasible return on the frontier
                 try:
                     target = float(min(mu_ann.max() * 0.95, mu_ann.mean() + 2.0 * mu_ann.std()))
                     ef.efficient_return(target_return=target)

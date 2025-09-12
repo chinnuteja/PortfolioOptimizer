@@ -6,22 +6,14 @@ import pandas as pd
 import numpy as np
 import logging, os, time, csv, requests
 from dotenv import load_dotenv
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # project modules
-# import config
-# import data_fetcher
-# import data_preparer
-# import forecaster
-# import optimizer
-# import rebalancer
-# from api_client import AssetSentimentAPI
-
 from portfolio_enhancer import (
     config, data_fetcher, data_preparer, forecaster, optimizer, rebalancer
 )
 from portfolio_enhancer.api_client import AssetSentimentAPI
-
-
 
 load_dotenv()
 
@@ -38,7 +30,15 @@ os.makedirs(EXPORT_DIR, exist_ok=True)
 # keep the latest job id so /explain works even if UI forgets to pass it
 LATEST_KPIS_JOB_ID = None
 
-EXPLAINER_URL = "https://portfolioexplain-production.up.railway.app/generate-portfolio-explanation"
+# ---- Explainer config (env overrideable) ----
+EXPLAINER_URL = os.environ.get(
+    "EXPLAINER_URL",
+    "https://portfolioexplain-production.up.railway.app/generate-portfolio-explanation"
+)
+EXPLAINER_CONNECT_TIMEOUT = float(os.environ.get("EXPLAINER_CONNECT_TIMEOUT", "10"))   # seconds
+EXPLAINER_READ_TIMEOUT    = float(os.environ.get("EXPLAINER_READ_TIMEOUT", "120"))     # seconds
+EXPLAINER_RETRIES         = int(os.environ.get("EXPLAINER_RETRIES", "3"))
+EXPLAINER_BACKOFF         = float(os.environ.get("EXPLAINER_BACKOFF", "0.8"))
 
 PROFILE_POLICY = {
     "MinRisk": {"anchor_strength": 0.60, "turnover_cap_pct": 8.0,  "max_asset_cap_pct": 30.0},
@@ -47,6 +47,30 @@ PROFILE_POLICY = {
 }
 
 # ---------- helpers ----------
+
+def _requests_session_with_retry(
+    total=EXPLAINER_RETRIES,
+    backoff_factor=EXPLAINER_BACKOFF,
+    status_forcelist=(429, 500, 502, 503, 504),
+):
+    """Session with retry/backoff for network resilience."""
+    s = requests.Session()
+    retries = Retry(
+        total=total,
+        read=total,
+        connect=total,
+        status=total,
+        backoff_factor=backoff_factor,
+        status_forcelist=status_forcelist,
+        allowed_methods=["POST", "GET"],
+        raise_on_status=False,
+        respect_retry_after_header=True,
+    )
+    adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    s.headers.update({"Accept": "application/json", "Content-Type": "application/json"})
+    return s
 
 def initialize_data():
     global asset_returns
@@ -62,7 +86,9 @@ def initialize_data():
         logger.error("initialize_data(): could not compute returns")
     else:
         logger.info("initialize_data(): returns ready %s", getattr(asset_returns, "shape", None))
+
 initialize_data()
+
 def _normalize_profile(p: str) -> str:
     if not p: return "Sharpe"
     s = p.strip().lower()
@@ -141,7 +167,7 @@ def _write_proposal_csv(filename, assets, current_pct, target_pct, proposed_pct,
 
 @app.route('/')
 def index():
-    return send_from_directory('.', 'index.html')
+    return send_from_directory(app.static_folder, 'index.html')
 
 @app.route('/health')
 def health():
@@ -188,7 +214,7 @@ def get_portfolio():
         LATEST_KPIS_JOB_ID = job_id
 
     # -------- 2) Fast heuristic sentiments (local; avoids blocking UI) ----------
-    # Use last 60 trading days: z-score of mean returns, clipped to [-2,2] then scaled to [-0.2,0.2].
+    # last 60 trading days: z-score of mean returns, clipped [-2,2] then scaled to [-0.2,0.2]
     try:
         recent = asset_returns[assets_all].tail(60)
         mu = recent.mean()
@@ -301,22 +327,19 @@ def get_portfolio():
 @app.route('/explain', methods=['POST'])
 def explain():
     """
-    Relays to explainer with exact schema it expects.
-    Body can contain:
-      job_id (optional), kpis_job_id (optional),
-      current_weights / current_portfolio,
-      final_weights / optimized_portfolio,
-      risk_profile_used / risk_profile
+    Relay to explainer with the schema it expects.
+    If the explainer is slow/busy, return 202 {status:'pending'} so the UI keeps polling.
     """
     data = request.get_json(silent=True) or {}
 
     job_id = data.get("job_id") or data.get("kpis_job_id") or LATEST_KPIS_JOB_ID
 
-    def _to_pct_map(key_list):
-        for k in key_list:
+    def _to_pct_map(keys):
+        for k in keys:
             m = data.get(k)
             if isinstance(m, dict):
-                try: return {a: float(m.get(a, 0.0)) for a in ["Gold","Equities","REITs","Bitcoin"]}
+                try:
+                    return {a: float(m.get(a, 0.0)) for a in ["Gold","Equities","REITs","Bitcoin"]}
                 except Exception:
                     pass
         return {"Gold":0.0,"Equities":0.0,"REITs":0.0,"Bitcoin":0.0}
@@ -324,10 +347,10 @@ def explain():
     current_portfolio   = _to_pct_map(["current_portfolio","current_weights"])
     optimized_portfolio = _to_pct_map(["optimized_portfolio","final_weights"])
 
-    rp = (data.get("risk_profile_used") or data.get("risk_profile") or "Balanced").lower()
-    if "min" in rp or "cons" in rp:   risk_profile = "Conservative"
-    elif "max" in rp or "agg" in rp:  risk_profile = "Aggressive"
-    else:                             risk_profile = "Balanced"
+    rp_in = (data.get("risk_profile_used") or data.get("risk_profile") or "Balanced").lower()
+    if "min" in rp_in or "cons" in rp_in:   risk_profile = "Conservative"
+    elif "max" in rp_in or "agg" in rp_in:  risk_profile = "Aggressive"
+    else:                                   risk_profile = "Balanced"
 
     if not job_id:
         return jsonify({"status":"error","error":"missing_job_id",
@@ -341,18 +364,42 @@ def explain():
     }
     logger.info("explain(): POST %s | payload=%s", EXPLAINER_URL, payload)
 
+    s = _requests_session_with_retry()
+
     try:
-        r = requests.post(EXPLAINER_URL, json=payload, timeout=60)
+        r = s.post(
+            EXPLAINER_URL,
+            json=payload,
+            timeout=(EXPLAINER_CONNECT_TIMEOUT, EXPLAINER_READ_TIMEOUT),
+        )
+
+        # If explainer signals not ready or transient overload → tell UI to keep polling
+        if r.status_code in (202, 425, 429, 500, 502, 503, 504):
+            logger.warning("Explainer not ready (HTTP %s). Returning pending.", r.status_code)
+            return jsonify({"status": "pending"}), 202
+
         if r.status_code != 200:
             logger.warning("Explainer returned %s: %s", r.status_code, r.text[:400])
-            return jsonify({"status":"error","error":f"explainer_http_{r.status_code}","message":r.text}), 200
-        return jsonify(r.json())
+            return jsonify({"status":"error",
+                            "error": f"explainer_http_{r.status_code}",
+                            "message": r.text}), 200
+
+        # Success
+        try:
+            return jsonify(r.json())
+        except Exception:
+            logger.exception("explain(): invalid JSON from explainer")
+            return jsonify({"status":"error","error":"invalid_json"}), 200
+
+    except requests.exceptions.ReadTimeout:
+        logger.warning("Explainer read timeout after %.1fs; returning pending", EXPLAINER_READ_TIMEOUT)
+        return jsonify({"status": "pending"}), 202
+
     except Exception as e:
         logger.exception("explain(): relay failed: %s", e)
         return jsonify({"status":"error","error":"relay_failed"}), 200
 
 if __name__ == "__main__":
-    
     port = int(os.environ.get("PORT", 5000))
     debug = os.environ.get("FLASK_ENV") == "development"
     app.run(host="0.0.0.0", port=port, debug=debug)
