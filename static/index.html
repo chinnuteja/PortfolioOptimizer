@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Portfolio Enhancer – Intelligent Portfolio Optimizer</title>
+  <style>
+    /* --- Self-contained minimal design system (no CDN) --- */
+    :root{
+      --bg:#ffffff; --text:#0f172a; --muted:#475569; --muted2:#64748b; --border:#e2e8f0;
+      --card:#ffffff; --subtle:#f8fafc; --primary:#4f46e5; --primary-600:#4f46e5; --primary-500:#6366f1;
+      --emerald:#059669; --rose:#dc2626; --ring:#c7d2fe;
+      --shadow: 0 8px 24px rgba(15,23,42,.06),0 2px 6px rgba(15,23,42,.04);
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+    .container{max-width:960px;margin:0 auto;padding:24px}
+    h1{font-size:clamp(28px,4vw,40px);margin:0 0 6px;font-weight:800}
+    h2{font-size:24px;margin:0 0 16px;font-weight:700}
+    h3{font-size:16px;margin:0 0 8px;font-weight:700}
+    p{margin:0}
+    .muted{color:var(--muted)}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:24px;padding:24px;box-shadow:var(--shadow)}
+    .card-soft{background:var(--subtle);border:1px solid var(--border);border-radius:16px;padding:16px}
+    .row{display:grid;gap:24px}
+    @media (min-width:768px){.row-2{grid-template-columns:1fr 1fr}.row-4{grid-template-columns:repeat(4,1fr)}}
+    .select,.input,.btn{
+      border:1px solid var(--border);border-radius:12px;background:#fff;padding:12px 14px;font:inherit;color:inherit
+    }
+    .select{width:100%}
+    .input{width:100%}
+    .btn{display:inline-block;background:var(--primary-600);color:#fff;font-weight:600;cursor:pointer;
+         box-shadow:0 6px 18px rgba(79,70,229,.25)}
+    .btn:hover{background:var(--primary-500)}
+    .btn-secondary{background:#fff;color:#111827;border:1px solid var(--border);box-shadow:none}
+    .btn[disabled]{opacity:.5;cursor:not-allowed}
+    .range{width:100%}
+    .label{display:block;font-size:12px;color:var(--muted);margin:0 0 6px}
+    .grid{display:grid;gap:12px}
+    .grid-2{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .grid-4{grid-template-columns:repeat(4,minmax(0,1fr))}
+    .flex{display:flex;align-items:center;gap:8px}
+    .between{display:flex;justify-content:space-between;align-items:center}
+    .chip{font-size:12px;color:#334155;background:#f1f5f9;border:1px solid var(--border);padding:2px 8px;border-radius:999px}
+    .error{background:#fef2f2;border:1px solid #fecaca;color:#991b1b;padding:12px;border-radius:12px}
+    .hidden{display:none}
+    .table-row{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)}
+    .table-row:last-child{border-bottom:0}
+    .footer{margin:24px 0 0;color:#6b7280;text-align:center;font-size:13px}
+
+    /* chart placeholder container */
+    .chart-box{width:100%;height:288px;border:1px solid var(--border);border-radius:16px;display:flex;align-items:center;justify-content:center;background:#fff}
+    canvas{display:block;width:100%;height:100%}
+
+    /* switches area */
+    .choice{display:flex;align-items:center;gap:8px;border:1px solid var(--border);border-radius:12px;padding:8px 12px;background:#fff}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="card" style="margin-bottom:24px">
+      <h1>Portfolio Enhancer</h1>
+      <p class="muted" style="font-size:18px">AI-Powered Portfolio Recommendation Engine</p>
+    </header>
+
+    <main class="row">
+      <section class="card">
+        <h2>Your Preferences</h2>
+
+        <div class="row row-2" style="align-items:center">
+          <select id="risk-profile" class="select">
+            <option value="MinRisk">Conservative (Minimize Risk)</option>
+            <option value="Sharpe" selected>Balanced (Max Risk-Adjusted Return)</option>
+            <option value="MaxRet">Aggressive (Maximize Returns)</option>
+            <option value="Custom">Custom</option>
+          </select>
+
+          <div>
+            <label class="label">Custom Risk Preference</label>
+            <input id="risk-slider" class="range" type="range" min="0" max="100" value="50">
+            <div class="between" style="font-size:12px;color:#64748b;margin-top:4px">
+              <span>Conservative</span><span id="risk-slider-value" style="font-weight:700;color:#0f172a">50</span><span>Aggressive</span>
+            </div>
+          </div>
+
+          <div></div>
+          <div class="between">
+            <button id="get-reco-btn" class="btn">Get Recommendation</button>
+          </div>
+        </div>
+
+        <div style="margin-top:16px">
+          <label class="label">Your Current Portfolio (%)</label>
+          <div class="grid grid-4">
+            <div>
+              <label class="label">Gold</label>
+              <input id="cw-gold" class="input" type="number" step="0.01" min="0" max="100" placeholder="e.g., 40">
+            </div>
+            <div>
+              <label class="label">Equities</label>
+              <input id="cw-equities" class="input" type="number" step="0.01" min="0" max="100" placeholder="e.g., 30">
+            </div>
+            <div>
+              <label class="label">REITs</label>
+              <input id="cw-reits" class="input" type="number" step="0.01" min="0" max="100" placeholder="e.g., 10">
+            </div>
+            <div>
+              <label class="label">Bitcoin</label>
+              <input id="cw-bitcoin" class="input" type="number" step="0.01" min="0" max="100" placeholder="e.g., 20">
+            </div>
+          </div>
+          <p style="font-size:12px;color:#64748b;margin-top:6px">Leave blank if you hold none — we’ll treat missing values as 0% and normalize if needed.</p>
+        </div>
+
+        <h3 style="margin-top:24px">Choose Your Assets</h3>
+        <p class="muted" style="font-size:14px;margin-bottom:8px">Uncheck to exclude an asset entirely.</p>
+        <div class="grid grid-4">
+          <label class="choice"><input type="checkbox" class="asset-toggle" value="Gold" checked> <span>Gold</span></label>
+          <label class="choice"><input type="checkbox" class="asset-toggle" value="Equities" checked> <span>Equities</span></label>
+          <label class="choice"><input type="checkbox" class="asset-toggle" value="REITs" checked> <span>REITs</span></label>
+          <label class="choice"><input type="checkbox" class="asset-toggle" value="Bitcoin" checked> <span>Bitcoin</span></label>
+        </div>
+
+        <div class="flex" style="gap:12px;margin-top:12px">
+          <button id="download-csv-btn" class="btn btn-secondary" disabled>Download CSV</button>
+          <span id="data-asof" class="chip" title="Latest date in backend returns cache"></span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Optimized Portfolio</h2>
+
+        <div id="loading" class="hidden" style="text-align:center;padding:24px">
+          <div style="width:48px;height:48px;border-radius:999px;border:4px solid #c7d2fe;border-right-color:transparent;margin:0 auto;animation:spin 1s linear infinite"></div>
+          <p class="muted" style="margin-top:10px">Crunching numbers…</p>
+        </div>
+
+        <div id="error" class="hidden error" style="margin-bottom:12px"></div>
+
+        <div id="content" class="hidden row row-2" style="align-items:flex-start">
+          <div class="chart-box"><canvas id="portfolio-chart"></canvas></div>
+          <div class="grid" style="gap:16px">
+            <div id="weights-table" class="card-soft"></div>
+            <div id="performance-table" class="card-soft"></div>
+
+            <div class="card-soft">
+              <div class="between" style="margin-bottom:6px">
+                <h3>Why this allocation (quick)</h3>
+                <button id="explain-btn" class="btn" style="background:var(--emerald)">Explain this allocation</button>
+              </div>
+              <p id="narrative" style="font-size:14px;color:#0f172a"></p>
+              <p id="explain-error" class="hidden" style="color:#b91c1c;font-size:14px;margin-top:6px"></p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <footer class="footer">
+        Disclaimer: Proof of Concept. Not investment advice.
+      </footer>
+    </main>
+  </div>
+
+  <script>
+    /* simple CSS spinner */
+    (function(){const s=document.createElement('style');s.textContent='@keyframes spin{to{transform:rotate(360deg)}}';document.head.appendChild(s);}());
+
+    // --- DOM refs
+    const riskProfileSel = document.getElementById('risk-profile');
+    const riskSlider = document.getElementById('risk-slider');
+    const riskSliderVal = document.getElementById('risk-slider-value');
+    const getBtn = document.getElementById('get-reco-btn');
+
+    const inputs = {
+      Gold:     document.getElementById('cw-gold'),
+      Equities: document.getElementById('cw-equities'),
+      REITs:    document.getElementById('cw-reits'),
+      Bitcoin:  document.getElementById('cw-bitcoin'),
+    };
+
+    const loading = document.getElementById('loading');
+    const errorEl = document.getElementById('error');
+    const content = document.getElementById('content');
+    const dl = document.getElementById('download-csv-btn');
+    const dataAsOf = document.getElementById('data-asof');
+
+    let chartState = null; // {ctx, values, colors}
+
+    const presetToSlider = { MinRisk:0, Sharpe:50, MaxRet:100 };
+    riskProfileSel.addEventListener('change', () => {
+      const val = riskProfileSel.value;
+      if (val !== 'Custom') { riskSlider.value = presetToSlider[val]; riskSliderVal.textContent = riskSlider.value; }
+    });
+    riskSlider.addEventListener('input', () => {
+      riskSliderVal.textContent = riskSlider.value;
+      if (riskProfileSel.value !== 'Custom') riskProfileSel.value = 'Custom';
+    });
+
+    function getCurrentWeightsPct() {
+      const m = {};
+      ["Gold","Equities","REITs","Bitcoin"].forEach(a => {
+        const v = parseFloat(inputs[a].value);
+        if (!isNaN(v) && v >= 0) m[a] = v; else m[a] = 0.0;
+      });
+      const sum = Object.values(m).reduce((s,x)=>s+x,0);
+      if (sum > 0) Object.keys(m).forEach(k => m[k] = +(m[k] / sum * 100).toFixed(2));
+      return m;
+    }
+
+    function getDisabledAssets() {
+      const arr = [];
+      document.querySelectorAll('.asset-toggle').forEach(cb => { if (!cb.checked) arr.push(cb.value); });
+      return arr;
+    }
+
+    // --- Minimal doughnut drawing (no libraries) ---
+    function drawDoughnut(canvas, values, colors) {
+      const dpr = window.devicePixelRatio || 1;
+      const w = canvas.clientWidth, h = canvas.clientHeight;
+      canvas.width = Math.floor(w * dpr);
+      canvas.height = Math.floor(h * dpr);
+      const ctx = canvas.getContext('2d');
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, w, h);
+
+      const total = values.reduce((s,v)=>s+Math.max(0,v),0) || 1;
+      const cx = w/2, cy = h/2, r = Math.min(w,h)*0.42;
+      let start = -Math.PI/2;
+
+      for (let i=0;i<values.length;i++){
+        const frac = Math.max(0, values[i]) / total;
+        const end = start + frac * Math.PI*2;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.arc(cx, cy, r, start, end);
+        ctx.closePath();
+        ctx.fillStyle = colors[i % colors.length];
+        ctx.fill();
+        start = end;
+      }
+      // hole
+      ctx.beginPath();
+      ctx.fillStyle = "#ffffff";
+      ctx.arc(cx, cy, r*0.65, 0, Math.PI*2);
+      ctx.fill();
+    }
+
+    function renderRecommendation(data) {
+      content.classList.remove('hidden');
+
+      const weights = data.weights_target_anchored_pct || data.weights_target_model_pct || {};
+      const perf    = data.performance || {};
+      const narrative = data.narrative || '';
+
+      // “as of” from headers (set by backend)
+      const latestHeader = data._latest_date || '';
+      if (latestHeader) dataAsOf.textContent = `Data as of ${latestHeader}`;
+
+      // weights table
+      const wt = document.getElementById('weights-table');
+      wt.innerHTML = `<div style="font-weight:700;margin-bottom:6px">Target Allocation</div>` +
+        Object.entries(weights).map(([k,v]) =>
+          `<div class="table-row"><span>${k}</span><span style="font-weight:700">${(+v).toFixed(2)}%</span></div>`
+        ).join('');
+
+      // performance table
+      const pt = document.getElementById('performance-table');
+      pt.innerHTML = `<div style="font-weight:700;margin-bottom:6px">Performance</div>` +
+        Object.entries(perf).map(([k,v]) =>
+          `<div class="table-row" style="border-bottom:0"><span style="color:var(--muted2)">${k}</span><span style="font-weight:700">${v}</span></div>`
+        ).join('');
+
+      document.getElementById('narrative').textContent = narrative;
+
+      // chart
+      const labels = Object.keys(weights);
+      const values = Object.values(weights).map(x => +x);
+      const colors = ['#4F46E5','#16A34A','#F59E0B','#EF4444'];
+      const canvas = document.getElementById('portfolio-chart');
+      drawDoughnut(canvas, values, colors);
+      chartState = {values, colors};
+      window.addEventListener('resize', () => { if(chartState) drawDoughnut(canvas, chartState.values, chartState.colors) });
+
+      // CSV download
+      if (data.csv_download_url) {
+        dl.disabled = false; 
+        dl.onclick = () => window.open(data.csv_download_url, '_blank');
+      }
+    }
+
+    // keep last recommendation for explain page
+    let lastReco = null;
+
+    document.getElementById('explain-btn').addEventListener('click', () => {
+      if (!lastReco) {
+        const exErr = document.getElementById('explain-error');
+        exErr.textContent = 'Please get a recommendation first.';
+        exErr.classList.remove('hidden');
+        return;
+      }
+      sessionStorage.setItem('portfolio_lastReco', JSON.stringify(lastReco));
+      window.open('/explain.html', '_blank');
+    });
+
+    // hook button
+    document.getElementById('get-reco-btn').addEventListener('click', async () => {
+      errorEl.classList.add('hidden');
+      document.getElementById('explain-error').classList.add('hidden');
+      content.classList.add('hidden');
+      loading.classList.remove('hidden');
+      dl.disabled = true;
+
+      const current = getCurrentWeightsPct();
+      const disabled = getDisabledAssets();
+
+      const payload = (riskProfileSel.value === 'Custom')
+        ? { risk_profile:'Sharpe', risk_slider: parseInt(riskSlider.value,10), current_weights: current, disabled_assets: disabled, export_csv: true }
+        : { risk_profile: riskProfileSel.value, risk_slider: presetToSlider[riskProfileSel.value], current_weights: current, disabled_assets: disabled, export_csv: true };
+
+      try {
+        const resp = await fetch('/get_portfolio', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+        // capture freshness headers if present
+        const latestHdr = resp.headers.get('X-Returns-Latest-Date');
+        const data = await resp.json();
+        if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
+        if (latestHdr) data._latest_date = latestHdr;
+
+        lastReco = {
+          jobId: data.kpis_job_id || null,
+          finalWeights: data.weights_target_anchored_pct || data.weights_target_model_pct || {},
+          profileUsed: data.risk_profile_used || 'Balanced',
+          currentWeights: current
+        };
+
+        renderRecommendation(data);
+
+      } catch (e) {
+        errorEl.textContent = e.message || 'Unknown error'; 
+        errorEl.classList.remove('hidden');
+      } finally {
+        loading.classList.add('hidden');
+      }
+    });
+
+    // initial value text
+    riskSliderVal.textContent = riskSlider.value;
+  </script>
+</body>
+</html>

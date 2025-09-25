@@ -1,10 +1,11 @@
-# app.py — backend with KPI job_id plumbed through to explainer (non-blocking KPI start)
+# app.py — backend with robust caching + refresh + safe math + static serving
 
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import pandas as pd
 import numpy as np
-import logging, os, time, csv, requests
+import logging, os, time, csv, requests, threading, math
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -17,26 +18,46 @@ from portfolio_enhancer.api_client import AssetSentimentAPI
 
 load_dotenv()
 
-app = Flask(__name__, static_folder='.', static_url_path='')
+# Serve /static reliably; keep a fallback to root index.html if needed
+app = Flask(__name__, static_folder='static', static_url_path='/static')
 CORS(app)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s [%(name)s] %(message)s')
 logger = logging.getLogger(__name__)
+logger.info("STATIC FOLDER = %s", os.path.abspath(app.static_folder))
 
 asset_returns = None
-EXPORT_DIR = os.path.join(os.getcwd(), "exports")
-os.makedirs(EXPORT_DIR, exist_ok=True)
 
-# keep the latest job id so /explain works even if UI forgets to pass it
+BASE_DIR = os.getcwd()
+EXPORT_DIR = os.path.join(BASE_DIR, "exports")
+CACHE_DIR = os.path.join(BASE_DIR, "cache")
+os.makedirs(EXPORT_DIR, exist_ok=True)
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+RETURNS_CACHE_PARQUET = os.path.join(CACHE_DIR, "asset_returns.parquet")
+RETURNS_CACHE_CSV     = os.path.join(CACHE_DIR, "asset_returns.csv")
+
+# --- refresh policy (hourly by default) ---
+RETURNS_MAX_AGE_SECONDS   = int(os.environ.get("RETURNS_MAX_AGE_SECONDS", "3600"))  # 1 hour
+STALE_WHILE_REVALIDATE    = os.environ.get("STALE_WHILE_REVALIDATE", "1") in ("1", "true", "True")
+FORCE_END_TODAY           = os.environ.get("FORCE_END_TODAY", "1") in ("1", "true", "True")
+# Optional hard cap (if cache older than this, block first request)
+RETURNS_HARD_MAX_AGE_SECONDS = int(os.environ.get("RETURNS_HARD_MAX_AGE_SECONDS", "0"))  # 0=disabled
+
+_RETURNS_LOCK = threading.Lock()
+
+# KPI throttling (reuse job for 10 min)
+KPI_JOB_TTL_SECONDS = int(os.environ.get("KPI_JOB_TTL_SECONDS", "600"))
 LATEST_KPIS_JOB_ID = None
+LATEST_KPIS_JOB_STARTED_AT = 0.0
 
 # ---- Explainer config (env overrideable) ----
 EXPLAINER_URL = os.environ.get(
     "EXPLAINER_URL",
     "https://portfolioexplain-production.up.railway.app/generate-portfolio-explanation"
 )
-EXPLAINER_CONNECT_TIMEOUT = float(os.environ.get("EXPLAINER_CONNECT_TIMEOUT", "10"))   # seconds
-EXPLAINER_READ_TIMEOUT    = float(os.environ.get("EXPLAINER_READ_TIMEOUT", "120"))     # seconds
+EXPLAINER_CONNECT_TIMEOUT = float(os.environ.get("EXPLAINER_CONNECT_TIMEOUT", "10"))
+EXPLAINER_READ_TIMEOUT    = float(os.environ.get("EXPLAINER_READ_TIMEOUT", "120"))
 EXPLAINER_RETRIES         = int(os.environ.get("EXPLAINER_RETRIES", "3"))
 EXPLAINER_BACKOFF         = float(os.environ.get("EXPLAINER_BACKOFF", "0.8"))
 
@@ -46,6 +67,8 @@ PROFILE_POLICY = {
     "MaxRet":  {"anchor_strength": 0.10, "turnover_cap_pct": 35.0, "max_asset_cap_pct": 40.0},
 }
 
+INIT_IN_PROGRESS = False
+
 # ---------- helpers ----------
 
 def _requests_session_with_retry(
@@ -53,18 +76,11 @@ def _requests_session_with_retry(
     backoff_factor=EXPLAINER_BACKOFF,
     status_forcelist=(429, 500, 502, 503, 504),
 ):
-    """Session with retry/backoff for network resilience."""
     s = requests.Session()
     retries = Retry(
-        total=total,
-        read=total,
-        connect=total,
-        status=total,
-        backoff_factor=backoff_factor,
-        status_forcelist=status_forcelist,
-        allowed_methods=["POST", "GET"],
-        raise_on_status=False,
-        respect_retry_after_header=True,
+        total=total, read=total, connect=total, status=total,
+        backoff_factor=backoff_factor, status_forcelist=status_forcelist,
+        allowed_methods=["POST", "GET"], raise_on_status=False, respect_retry_after_header=True,
     )
     adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10)
     s.mount("https://", adapter)
@@ -72,21 +88,165 @@ def _requests_session_with_retry(
     s.headers.update({"Accept": "application/json", "Content-Type": "application/json"})
     return s
 
-def initialize_data():
-    global asset_returns
-    logger.info("initialize_data(): fetching historical data…")
-    prices, _ = data_fetcher.get_data(
-        config.ASSETS, config.SENTIMENT_TICKER, config.START_DATE, config.END_DATE
-    )
-    if prices.empty:
-        logger.error("initialize_data(): could not download historical prices")
-        return
-    asset_returns = data_preparer.calculate_returns(prices)
-    if asset_returns.empty:
-        logger.error("initialize_data(): could not compute returns")
-    else:
-        logger.info("initialize_data(): returns ready %s", getattr(asset_returns, "shape", None))
+def _load_returns_cache() -> pd.DataFrame:
+    if os.path.exists(RETURNS_CACHE_PARQUET):
+        try:
+            df = pd.read_parquet(RETURNS_CACHE_PARQUET)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                logger.info("initialize_data(): loaded returns from parquet cache %s", df.shape)
+                return df
+        except Exception as e:
+            logger.warning("initialize_data(): parquet cache read failed: %s", e)
+    if os.path.exists(RETURNS_CACHE_CSV):
+        try:
+            df = pd.read_csv(RETURNS_CACHE_CSV, index_col=0, parse_dates=True)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                logger.info("initialize_data(): loaded returns from csv cache %s", df.shape)
+                return df
+        except Exception as e:
+            logger.warning("initialize_data(): csv cache read failed: %s", e)
+    return pd.DataFrame()
 
+def _save_returns_cache(df: pd.DataFrame) -> None:
+    if df is None or df.empty:
+        return
+    try:
+        df.to_parquet(RETURNS_CACHE_PARQUET, index=True)
+    except Exception as e:
+        logger.warning("initialize_data(): cache parquet write failed: %s", e)
+    try:
+        df.to_csv(RETURNS_CACHE_CSV, index=True)
+    except Exception as e:
+        logger.warning("initialize_data(): cache csv write failed: %s", e)
+
+def _get_prices_with_retries(assets, sentiment_ticker, start_date, end_date, attempts=3, backoff=1.5):
+    last_exc = None
+    for i in range(1, attempts + 1):
+        try:
+            return data_fetcher.get_data(assets, sentiment_ticker, start_date, end_date)
+        except Exception as e:
+            last_exc = e
+            logger.warning("get_data retry %d/%d failed: %s", i, attempts, e)
+            time.sleep(backoff ** i)
+    logger.error("get_data retries exhausted: %s; using internal fallback", last_exc)
+    return data_fetcher._get_fallback_data(assets, sentiment_ticker, start_date, end_date)
+
+def _rolling_dates():
+    """Choose END_DATE = today (UTC) if FORCE_END_TODAY is set or config.END_DATE is None."""
+    start_date = config.START_DATE
+    if FORCE_END_TODAY or not getattr(config, "END_DATE", None):
+        end_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    else:
+        end_date = config.END_DATE
+    return start_date, end_date
+
+def _cache_age_seconds() -> float:
+    path = RETURNS_CACHE_PARQUET if os.path.exists(RETURNS_CACHE_PARQUET) else RETURNS_CACHE_CSV
+    if not path or not os.path.exists(path):
+        return float("inf")
+    try:
+        mtime = os.path.getmtime(path)
+        return max(0.0, time.time() - mtime)
+    except Exception:
+        return float("inf")
+
+def _refresh_returns_blocking() -> bool:
+    """Recompute returns from live data, update global + caches."""
+    global asset_returns
+    with _RETURNS_LOCK:
+        t0 = time.time()
+        try:
+            start_date, end_date = _rolling_dates()
+            logger.info("refresh_returns(): START  range=%s→%s  cache_age=%s",
+                        start_date, end_date,
+                        "inf" if not math.isfinite(_cache_age_seconds()) else int(_cache_age_seconds()))
+            prices, _ = _get_prices_with_retries(
+                config.ASSETS, config.SENTIMENT_TICKER, start_date, end_date,
+                attempts=3, backoff=1.5
+            )
+            if prices.empty:
+                logger.error("refresh_returns(): download empty; keeping existing cache (took %.1fs)", time.time()-t0)
+                return False
+
+            new_returns = data_preparer.calculate_returns(prices)
+            if new_returns.empty:
+                logger.error("refresh_returns(): cleaned returns empty; keeping existing cache (took %.1fs)", time.time()-t0)
+                return False
+
+            asset_returns = new_returns
+            _save_returns_cache(asset_returns)
+            logger.info("refresh_returns(): DONE   shape=%s  latest_date=%s  elapsed=%.1fs",
+                        getattr(asset_returns, "shape", None),
+                        str(asset_returns.index.max()) if hasattr(asset_returns, "index") else "n/a",
+                        time.time()-t0)
+            return True
+        except Exception as e:
+            logger.exception("refresh_returns(): FAILED after %.1fs: %s", time.time()-t0, e)
+            return False
+
+def maybe_refresh_returns_if_stale(blocking: bool = False):
+    """Refresh policy:
+       - If age < RETURNS_MAX_AGE_SECONDS: do nothing.
+       - If RETURNS_HARD_MAX_AGE_SECONDS > 0 and age >= HARD: block refresh.
+       - Else: refresh per blocking flag (SWR if False)."""
+    age = _cache_age_seconds()
+    if age < RETURNS_MAX_AGE_SECONDS:
+        return
+    if RETURNS_HARD_MAX_AGE_SECONDS > 0 and age >= RETURNS_HARD_MAX_AGE_SECONDS:
+        _refresh_returns_blocking()
+        return
+    if blocking:
+        _refresh_returns_blocking()
+    else:
+        t = threading.Thread(target=_refresh_returns_blocking, daemon=True)
+        t.start()
+
+def initialize_data():
+    """Load cached returns or compute them once at startup."""
+    global asset_returns, INIT_IN_PROGRESS
+    if INIT_IN_PROGRESS:
+        return
+    INIT_IN_PROGRESS = True
+    try:
+        # 1) Try cache first
+        cached = _load_returns_cache()
+        if not cached.empty:
+            asset_returns = cached
+            # If stale, refresh (background by default)
+            if STALE_WHILE_REVALIDATE:
+                maybe_refresh_returns_if_stale(blocking=False)
+            else:
+                maybe_refresh_returns_if_stale(blocking=True)
+            logger.info("initialize_data(): latest date in returns = %s", str(asset_returns.index.max()))
+            return
+
+        # 2) No cache: fetch and build now
+        logger.info("initialize_data(): fetching historical data…")
+        start_date, end_date = _rolling_dates()
+        prices, _ = _get_prices_with_retries(
+            config.ASSETS, config.SENTIMENT_TICKER, start_date, end_date,
+            attempts=3, backoff=1.5
+        )
+        if prices.empty:
+            logger.error("initialize_data(): could not download historical prices")
+            asset_returns = pd.DataFrame()
+            return
+
+        # 3) Compute returns
+        asset_returns_local = data_preparer.calculate_returns(prices)
+        if asset_returns_local.empty:
+            logger.error("initialize_data(): could not compute returns")
+            asset_returns = pd.DataFrame()
+            return
+
+        asset_returns = asset_returns_local
+        _save_returns_cache(asset_returns)
+        logger.info("initialize_data(): returns ready %s | latest_date=%s",
+                    getattr(asset_returns, "shape", None), str(asset_returns.index.max()))
+    finally:
+        INIT_IN_PROGRESS = False
+
+# Warmup
 initialize_data()
 
 def _normalize_profile(p: str) -> str:
@@ -114,7 +274,6 @@ def project_to_caps_simplex(w: pd.Series, cap: pd.Series) -> pd.Series:
             room = capv.sum()
             if room > 0: wv = capv / room
         return pd.Series(wv, index=idx)
-    # total < 1 → distribute remainder to available room
     rem  = 1.0 - total
     room = capv - wv
     mask = room > 1e-12
@@ -167,11 +326,31 @@ def _write_proposal_csv(filename, assets, current_pct, target_pct, proposed_pct,
 
 @app.route('/')
 def index():
-    return send_from_directory(app.static_folder, 'index.html')
+    """
+    Serve index from /static if present, else 404 with hint.
+    """
+    static_index = os.path.join(app.static_folder, 'index.html')
+    if os.path.exists(static_index):
+        return app.send_static_file('index.html')
+    # fallback for older setups: if index at project root, serve it
+    root_index = os.path.join(BASE_DIR, 'index.html')
+    if os.path.exists(root_index):
+        return send_from_directory(BASE_DIR, 'index.html')
+    return jsonify({"error":"index_not_found","message":"Place index.html under the /static folder."}), 404
 
 @app.route('/health')
 def health():
-    return jsonify({"status":"ok", "assets_loaded": asset_returns is not None and not asset_returns.empty})
+    latest = None
+    try:
+        latest = str(asset_returns.index.max()) if asset_returns is not None and not asset_returns.empty else None
+    except Exception:
+        latest = None
+    return jsonify({
+        "status": "ok",
+        "assets_loaded": asset_returns is not None and not asset_returns.empty,
+        "latest_date": latest,
+        "cache_age_seconds": None if not math.isfinite(_cache_age_seconds()) else int(_cache_age_seconds())
+    })
 
 @app.route('/download/<path:filename>')
 def download(filename):
@@ -183,8 +362,31 @@ def get_portfolio():
     Returns optimized portfolio + kpis_job_id (needed by /explain).
     KPI job is started non-blockingly to avoid delaying optimization.
     """
-    if asset_returns is None or asset_returns.empty:
-        return jsonify({"error":"Historical data not loaded."}), 500
+    global asset_returns, LATEST_KPIS_JOB_ID, LATEST_KPIS_JOB_STARTED_AT
+
+    # Ensure data present (try init once if missing)
+    if asset_returns is None or getattr(asset_returns, "empty", True):
+        initialize_data()
+
+    # SAFE cache age handling (don't cast inf to int)
+    age = _cache_age_seconds()  # float (seconds) or inf
+    age_str = "inf" if not math.isfinite(age) else str(int(age))
+    swr_flag = "1" if STALE_WHILE_REVALIDATE else "0"
+    hard_cap_str = str(RETURNS_HARD_MAX_AGE_SECONDS or "disabled")
+    logger.info("get_portfolio(): cache_age=%ss  swr=%s  hard_cap=%s", age_str, swr_flag, hard_cap_str)
+
+    # If we have no cache or still empty → blocking refresh now
+    if (asset_returns is None or getattr(asset_returns, "empty", True)) or not math.isfinite(age):
+        logger.info("get_portfolio(): no cache / empty returns → blocking refresh now")
+        ok = _refresh_returns_blocking()
+        if not ok or asset_returns is None or getattr(asset_returns, "empty", True):
+            return jsonify({"error":"Historical data not loaded. Please retry shortly."}), 503, {"Retry-After": "3"}
+
+    # Apply refresh policy for normal cases
+    if STALE_WHILE_REVALIDATE:
+        maybe_refresh_returns_if_stale(blocking=False)
+    else:
+        maybe_refresh_returns_if_stale(blocking=True)
 
     data = request.get_json(silent=True) or {}
     risk_profile_in = data.get("risk_profile", "Sharpe")
@@ -198,23 +400,24 @@ def get_portfolio():
     if not investable:
         return jsonify({"error":"All assets deselected. Enable at least one."}), 400
 
-    # -------- 1) KPI pipeline: fire-and-forget (no waiting) ----------
+    # 1) KPI pipeline: at most once per TTL, reuse recent job_id
     job_id = None
-    try:
-        api = AssetSentimentAPI()
-        job_id = api.start_analysis(assets=None, timeout_minutes=15)  # backend uses its own canonical list
-        logger.info("get_portfolio(): started KPI job_id=%s", job_id)
-    except Exception as e:
-        logger.warning("KPI pipeline start failed: %s", e)
-        job_id = None
+    now_ts = time.time()
+    if LATEST_KPIS_JOB_ID and (now_ts - LATEST_KPIS_JOB_STARTED_AT) < KPI_JOB_TTL_SECONDS:
+        job_id = LATEST_KPIS_JOB_ID
+        logger.info("get_portfolio(): reusing KPI job_id=%s (age=%.1fs)", job_id, now_ts - LATEST_KPIS_JOB_STARTED_AT)
+    else:
+        try:
+            api = AssetSentimentAPI()
+            job_id = api.start_analysis(assets=None, timeout_minutes=15)
+            LATEST_KPIS_JOB_ID = job_id
+            LATEST_KPIS_JOB_STARTED_AT = now_ts
+            logger.info("get_portfolio(): started KPI job_id=%s", job_id)
+        except Exception as e:
+            logger.warning("KPI pipeline start failed: %s", e)
+            job_id = LATEST_KPIS_JOB_ID  # fall back to last known if any
 
-    # remember latest job id so /explain works even if UI forgets to pass it
-    global LATEST_KPIS_JOB_ID
-    if job_id:
-        LATEST_KPIS_JOB_ID = job_id
-
-    # -------- 2) Fast heuristic sentiments (local; avoids blocking UI) ----------
-    # last 60 trading days: z-score of mean returns, clipped [-2,2] then scaled to [-0.2,0.2]
+    # 2) Heuristic sentiments (fast, local)
     try:
         recent = asset_returns[assets_all].tail(60)
         mu = recent.mean()
@@ -227,28 +430,36 @@ def get_portfolio():
 
     # 3) Expected returns with sentiment tilt
     local_returns = asset_returns[investable].copy()
+    # Double-sanitize before optimizer
+    local_returns = local_returns.replace([np.inf, -np.inf], np.nan).dropna(how="any")
+    if local_returns.empty:
+        return jsonify({"error":"No valid return series after sanitization."}), 500
+
     expected_returns = forecaster.generate_forecasted_returns(
         local_returns,
         {a: heuristic_sentiments.get(a, 0.0) for a in investable}
     )
 
-    # 4) Optimize
+    # 4) Optimize (guard against warnings; fallback handled inside optimizer)
     if risk_slider is not None:
         try:
-            weights, performance = optimizer.get_portfolio_by_slider(local_returns, expected_returns, float(risk_slider))
+            with np.errstate(invalid="ignore", over="ignore"):
+                weights, performance = optimizer.get_portfolio_by_slider(local_returns, expected_returns, float(risk_slider))
             slider_used = int(round(max(0, min(100, float(risk_slider)))))
             profile_used = "Balanced" if slider_used == 50 else "Custom"
         except Exception as e:
             logger.warning("slider fallback: %s", e)
-            weights, performance = optimizer.get_optimal_portfolio(local_returns, expected_returns, objective=objective)
+            with np.errstate(invalid="ignore", over="ignore"):
+                weights, performance = optimizer.get_optimal_portfolio(local_returns, expected_returns, objective=objective)
             slider_used = {"MinRisk":0,"Sharpe":50,"MaxRet":100}.get(objective,50)
             profile_used = "Balanced" if objective=="Sharpe" else ("Conservative" if objective=="MinRisk" else "Aggressive")
     else:
-        weights, performance = optimizer.get_optimal_portfolio(local_returns, expected_returns, objective=objective)
+        with np.errstate(invalid="ignore", over="ignore"):
+            weights, performance = optimizer.get_optimal_portfolio(local_returns, expected_returns, objective=objective)
         slider_used = {"MinRisk":0,"Sharpe":50,"MaxRet":100}.get(objective,50)
         profile_used = "Balanced" if objective=="Sharpe" else ("Conservative" if objective=="MinRisk" else "Aggressive")
 
-    if weights.empty:
+    if weights is None or getattr(weights, "empty", True):
         return jsonify({"error":"Optimization failed."}), 500
 
     # 5) Cap + anchor to user
@@ -276,7 +487,7 @@ def get_portfolio():
         asset_order=assets_all
     )
 
-    # 6) Performance of anchored target (annualized)
+    # 6) Performance (annualized)
     mu = expected_returns.reindex(target_anchored.index).fillna(0.0)
     cov = asset_returns.cov().reindex(index=mu.index, columns=mu.index).fillna(0.0)
     ret = float((mu @ target_anchored) * 252.0)
@@ -300,29 +511,19 @@ def get_portfolio():
         "risk_slider_used": slider_used,
         "investable_assets": investable,
         "disabled_assets": list(disabled),
-        "kpis_job_id": job_id or LATEST_KPIS_JOB_ID  # provide job_id for /explain
+        "kpis_job_id": job_id or LATEST_KPIS_JOB_ID
     }
 
-    if export_csv:
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        fname = f"proposal_{objective}_{ts}.csv"
-        csv_path = _write_proposal_csv(
-            filename=fname,
-            assets=assets_all,
-            current_pct=(cur*100).round(2).to_dict(),
-            target_pct=(target_raw*100).round(2).to_dict(),
-            proposed_pct=plan.get("proposed", {}),
-            trades_pct=plan.get("trades_pct", {}),
-            turnover_used_pct=float(plan.get("turnover_used_pct", 0)),
-            sentiments={k: round(float(v),3) for k,v in heuristic_sentiments.items()},
-            performance=perf,
-            policy=pol,
-            objective=objective
-        )
-        response["csv_filename"] = os.path.basename(csv_path)
-        response["csv_download_url"] = f"/download/{os.path.basename(csv_path)}"
-
-    return jsonify(response)
+    resp = jsonify(response)
+    # Freshness/debug headers (robust to inf)
+    try:
+        age = _cache_age_seconds()
+        resp.headers["X-Returns-Cache-Age-Seconds"] = "inf" if not math.isfinite(age) else str(int(age))
+        resp.headers["X-Returns-SWR"] = "1" if STALE_WHILE_REVALIDATE else "0"
+        resp.headers["X-Returns-Latest-Date"] = str(asset_returns.index.max())
+    except Exception:
+        pass
+    return resp
 
 @app.route('/explain', methods=['POST'])
 def explain():
@@ -367,13 +568,8 @@ def explain():
     s = _requests_session_with_retry()
 
     try:
-        r = s.post(
-            EXPLAINER_URL,
-            json=payload,
-            timeout=(EXPLAINER_CONNECT_TIMEOUT, EXPLAINER_READ_TIMEOUT),
-        )
+        r = s.post(EXPLAINER_URL, json=payload, timeout=(EXPLAINER_CONNECT_TIMEOUT, EXPLAINER_READ_TIMEOUT))
 
-        # If explainer signals not ready or transient overload → tell UI to keep polling
         if r.status_code in (202, 425, 429, 500, 502, 503, 504):
             logger.warning("Explainer not ready (HTTP %s). Returning pending.", r.status_code)
             return jsonify({"status": "pending"}), 202
@@ -384,7 +580,6 @@ def explain():
                             "error": f"explainer_http_{r.status_code}",
                             "message": r.text}), 200
 
-        # Success
         try:
             return jsonify(r.json())
         except Exception:
@@ -400,6 +595,13 @@ def explain():
         return jsonify({"status":"error","error":"relay_failed"}), 200
 
 if __name__ == "__main__":
+    # Local runs: keep reloader off by default (Windows flakiness).
     port = int(os.environ.get("PORT", 5000))
-    debug = os.environ.get("FLASK_ENV") == "development"
-    app.run(host="0.0.0.0", port=port, debug=debug)
+    debug_env = os.environ.get("FLASK_DEBUG", "0") in ("1", "true", "True")
+    disable_reloader = os.environ.get("DISABLE_RELOADER", "1") in ("1", "true", "True")
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=debug_env,
+        use_reloader=(debug_env and not disable_reloader)
+    )

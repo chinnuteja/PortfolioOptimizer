@@ -4,84 +4,98 @@
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Explanation — portfolio_enhancer</title>
-  <script src="https://cdn.tailwindcss.com"></script>
   <style>
-    body { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, 'Helvetica Neue', Arial; }
-    @import url('https://rsms.me/inter/inter.css');
+    :root{
+      --bg1:#0b1220; --bg2:#0b1220; --text:#e5e7eb; --muted:#9ca3af; --border:rgba(255,255,255,.12);
+      --card:rgba(255,255,255,.06); --chip:rgba(255,255,255,.1);
+      --indigo:#818cf8; --emerald:#34d399; --rose:#f87171;
+      --shadow:0 8px 24px rgba(0,0,0,.25),0 2px 6px rgba(0,0,0,.2);
+    }
+    *{box-sizing:border-box}
+    /* The missing piece: hide utility */
+    .hidden{display:none !important;}
+
+    body{margin:0;background:linear-gradient(140deg,var(--bg1),var(--bg2));color:var(--text);font:16px/1.6 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;min-height:100vh}
+    .container{max-width:1100px;margin:0 auto;padding:24px}
+    h1{font-size:clamp(26px,4vw,36px);margin:0;font-weight:800}
+    h2{font-size:22px;margin:0 0 16px;font-weight:700}
+    h3{font-size:16px;margin:0 0 8px;font-weight:700}
+    .muted{color:var(--muted)}
+    .card{background:var(--card);backdrop-filter:blur(6px);border:1px solid var(--border);border-radius:24px;padding:24px;box-shadow:var(--shadow)}
+    .chip{font-size:12px;color:#cbd5e1;background:var(--chip);border:1px solid var(--border);padding:4px 10px;border-radius:999px}
+    .grid{display:grid;gap:16px}
+    @media (min-width:640px){.grid-2{grid-template-columns:repeat(2,1fr)}}
+    @media (min-width:1024px){.grid-4{grid-template-columns:repeat(4,1fr)} .grid-3{grid-template-columns:1fr 1fr 1fr}}
+    .error{background:rgba(239,68,68,.18);border:1px solid rgba(248,113,113,.7);color:#ffecec;padding:12px;border-radius:16px}
+    .btn{display:inline-block;background:#10b981;color:#041016;font-weight:700;padding:10px 14px;border-radius:10px;border:0;cursor:pointer}
+    .tile{border:1px solid var(--border);border-radius:16px;padding:14px;background:var(--card)}
+    .tile .title{font-weight:700}
+    .row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)}
+    .row:last-child{border-bottom:0}
   </style>
 </head>
-<body class="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-slate-100">
-  <div class="max-w-6xl mx-auto p-4 md:p-8">
-    <!-- Header -->
-    <header class="mb-6">
-      <div class="rounded-3xl bg-white/10 backdrop-blur border border-white/10 p-6 md:p-8 shadow-xl">
-        <div class="flex items-center justify-between flex-wrap gap-3">
-          <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">Explanation</h1>
-          <span id="asof" class="text-xs md:text-sm px-3 py-1 rounded-full bg-white/10 border border-white/10 text-slate-300"></span>
-        </div>
+<body>
+  <div class="container">
+    <header class="card" style="margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+        <h1>Explanation</h1>
+        <span id="asof" class="chip"></span>
       </div>
     </header>
 
-    <!-- Loading -->
-    <div id="loading" class="rounded-3xl bg-white/10 backdrop-blur border border-white/10 p-10 text-center shadow-xl">
-      <div class="animate-spin rounded-full h-14 w-14 border-b-4 border-indigo-400 mx-auto"></div>
-      <p class="mt-4 text-slate-300">Generating explanation…</p>
+    <!-- LOADING (visible only before we have data) -->
+    <div id="loading" class="card" style="text-align:center">
+      <div style="width:56px;height:56px;border-radius:999px;border:5px solid #a5b4fc;border-right-color:transparent;margin:0 auto;animation:spin 1s linear infinite"></div>
+      <p class="muted" style="margin-top:10px">Generating explanation…</p>
     </div>
 
-    <!-- Error -->
-    <div id="error" class="hidden bg-red-500/20 border border-red-400 text-red-100 px-4 py-3 rounded-2xl mb-6"></div>
+    <!-- ERROR -->
+    <div id="error" class="hidden error" style="margin:16px 0 0"></div>
 
-    <!-- Cards -->
-    <section id="cards" class="hidden grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8"></section>
+    <!-- CARDS + ANALYSIS (hidden until render) -->
+    <section id="cards" class="hidden grid grid-4" style="margin:16px 0"></section>
 
-    <!-- Analysis -->
-    <section id="analysis" class="hidden rounded-3xl bg-white/10 backdrop-blur border border-white/10 p-6 md:p-8 shadow-xl">
-      <div class="flex items-center justify-between mb-6">
-        <h2 id="asset-title" class="text-2xl font-semibold">Asset Class Analysis</h2>
-        <div id="asset-alloc" class="text-2xl font-extrabold"></div>
+    <section id="analysis" class="hidden card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <h2 id="asset-title">Asset Class Analysis</h2>
+        <div id="asset-alloc" style="font-size:22px;font-weight:800"></div>
       </div>
 
-      <!-- NEW LAYOUT: left column stacks Historical + Risk, right side is Key Indicators spanning 2 cols -->
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-6 items-start">
-        <!-- Left column (stacked cards) -->
-        <div class="flex flex-col gap-6 order-2 md:order-1">
-          <div class="bg-white/5 border border-white/10 rounded-2xl p-4">
-            <h3 class="text-slate-200 font-semibold mb-2">Historical Returns</h3>
-            <div id="hist" class="divide-y divide-white/10">
-              <!-- rows injected -->
-            </div>
+      <div class="grid grid-3" style="align-items:start">
+        <!-- Left stacked: Historical + Risk -->
+        <div class="grid" style="order:2">
+          <div class="tile">
+            <h3 class="title" style="margin-bottom:6px">Historical Returns</h3>
+            <div id="hist"></div>
           </div>
-
-          <div class="bg-white/5 border border-white/10 rounded-2xl p-4">
-            <h3 class="text-slate-200 font-semibold mb-2">Risk Metrics</h3>
-            <div id="risk" class="divide-y divide-white/10">
-              <!-- rows injected -->
-            </div>
+          <div class="tile">
+            <h3 class="title" style="margin-bottom:6px">Risk Metrics</h3>
+            <div id="risk"></div>
           </div>
         </div>
 
-        <!-- Key Indicators spanning two columns -->
-        <div class="bg-white/5 border border-white/10 rounded-2xl p-4 md:col-span-2 order-1 md:order-2">
-          <h3 class="text-slate-200 font-semibold mb-2">Key Indicators</h3>
-          <div id="indicators" class="text-sm">
-            <!-- tidy two-column dl injected -->
-          </div>
+        <!-- Indicators (two columns span) -->
+        <div class="tile" style="order:1;grid-column:span 2">
+          <h3 class="title" style="margin-bottom:6px">Key Indicators</h3>
+          <div id="indicators"></div>
         </div>
       </div>
 
-      <div class="mt-6 bg-white/5 rounded-2xl p-4 border border-white/10">
-        <p id="asset-expl" class="text-sm text-slate-200 leading-6"></p>
+      <div class="tile" style="margin-top:16px">
+        <p id="asset-expl" class="muted"></p>
       </div>
     </section>
 
-    <!-- Rationale -->
-    <section id="rationale-wrap" class="hidden rounded-3xl bg-white/10 backdrop-blur border border-white/10 p-6 md:p-8 mt-8 shadow-xl">
-      <h3 class="text-xl font-semibold mb-2">Portfolio Rationale</h3>
-      <p id="rationale" class="text-sm text-slate-200 leading-6"></p>
+    <section id="rationale-wrap" class="hidden card" style="margin-top:16px">
+      <h3 class="title" style="margin-bottom:6px">Portfolio Rationale</h3>
+      <p id="rationale" class="muted"></p>
     </section>
   </div>
 
   <script>
+    // simple keyframes for spinner
+    (function(){const s=document.createElement('style');s.textContent='@keyframes spin{to{transform:rotate(360deg)}}';document.head.appendChild(s);}());
+
     const loadingEl = document.getElementById('loading');
     const errorEl   = document.getElementById('error');
     const cardsEl   = document.getElementById('cards');
@@ -100,18 +114,14 @@
     let lastReco = null;
     try { lastReco = JSON.parse(sessionStorage.getItem('portfolio_lastReco') || 'null'); } catch(e){}
 
-    const statRow = (label, value) => `
-      <div class="flex items-center justify-between py-2">
-        <span class="text-slate-300">${label}</span>
-        <span class="font-semibold">${value}</span>
-      </div>`;
+    const statRow = (label, value) =>
+      `<div class="row"><span class="muted">${label}</span><span style="font-weight:700">${value}</span></div>`;
 
     const fmtPct = x => `${(+x).toFixed(2)}%`;
     const titleize = s => s.replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase());
 
-    // Pretty two-column layout for Key Indicators
     function renderIndicators(km){
-      if (!km || Object.keys(km).length === 0) return `<div class="text-slate-400">—</div>`;
+      if (!km || Object.keys(km).length === 0) return `<div class="muted">—</div>`;
       const labelMap = {
         global_context: 'Global Context',
         institutional_flows: 'Institutional Flows',
@@ -131,18 +141,17 @@
       return Object.entries(km).map(([k,v]) => {
         const label = labelMap[k] || titleize(k);
         const val = (v === null || v === undefined) ? '—' : String(v);
-        return `
-          <div class="grid grid-cols-[160px_1fr] gap-x-4 items-start py-3 border-b border-white/10 last:border-0">
-            <div class="text-slate-300">${label}</div>
-            <div class="font-semibold leading-relaxed text-slate-100 break-words">${val}</div>
-          </div>`;
+        return `<div class="row" style="border-bottom:1px dashed var(--border)">
+                  <span class="muted" style="min-width:160px">${label}</span>
+                  <span style="font-weight:700">${val}</span>
+                </div>`;
       }).join('');
     }
 
     async function callExplain(payload){
       const resp = await fetch('/explain', {
         method:'POST',
-        headers:{'Content-Type':'application/json', 'Cache-Control':'no-store'},
+        headers:{'Content-Type':'application/json','Cache-Control':'no-store'},
         body: JSON.stringify(payload)
       });
       let json = null;
@@ -164,24 +173,29 @@
         risk_profile_used: lastReco.profileUsed || 'Balanced'
       };
 
-      // Poll if explainer is still preparing fresh KPIs
       let attempts = 0, MAX = 60;
       while (attempts < MAX) {
         attempts++;
         const { status, body } = await callExplain(basePayload);
+
         if (status === 202 || (body && body.status === 'pending')) {
           await new Promise(r => setTimeout(r, Math.min(2000 + attempts*1500, 7000)));
           continue;
         }
+
+        // stop loading once we have a final answer (success or error)
         loadingEl.classList.add('hidden');
+
         if (!body || body.status === 'error') {
           errorEl.textContent = (body && (body.message || body.error)) || 'Could not generate explanation.';
           errorEl.classList.remove('hidden');
           return;
         }
+
         render(body);
         return;
       }
+
       loadingEl.classList.add('hidden');
       errorEl.textContent = 'Still preparing fresh metrics. Please wait a moment and click Refresh.';
       errorEl.classList.remove('hidden');
@@ -202,27 +216,27 @@
         const delta = (+rec) - (+cur);
         const up = delta > 0;
         const arrow = up ? '▲' : (delta < 0 ? '▼' : '—');
-        const arrowClr = up ? 'text-emerald-400' : (delta < 0 ? 'text-rose-400' : 'text-slate-400');
+        const clr = up ? '#34d399' : (delta<0 ? '#f87171' : '#94a3b8');
         return `
-          <button data-asset="${a}"
-                  class="asset-card text-left rounded-2xl bg-white/10 backdrop-blur border border-white/10 p-4 hover:bg-white/15 transition shadow-lg">
-            <div class="flex items-center justify-between">
-              <div class="text-lg font-semibold">${a}</div>
-              <div class="text-sm ${arrowClr} font-semibold">${arrow} ${delta===0? '0.00' : Math.abs(delta).toFixed(2)} pp</div>
+          <button data-asset="${a}" class="tile" style="text-align:left">
+            <div class="row" style="border-bottom:0">
+              <div class="title">${a}</div>
+              <div style="font-weight:700;color:${clr}">${arrow} ${delta===0? '0.00' : Math.abs(delta).toFixed(2)} pp</div>
             </div>
-            <div class="mt-4 text-4xl font-extrabold">${fmtPct(rec)}</div>
-            <div class="mt-1 text-slate-300 text-sm">Recommended allocation</div>
-            <div class="mt-4 w-full text-center rounded-lg bg-slate-900/50 border border-white/10 py-2">View Details</div>
-          </button>
-        `;
+            <div class="title" style="font-size:28px">${fmtPct(rec)}</div>
+            <div class="muted" style="font-size:13px">Recommended allocation</div>
+            <div class="tile" style="text-align:center;margin-top:10px">View Details</div>
+          </button>`;
       }).join('');
+
       cardsEl.classList.remove('hidden');
 
       if (order.length) showAsset(order[0], assets);
       rationale.textContent = pa.allocation_rationale || '—';
-      document.getElementById('rationale-wrap').classList.remove('hidden');
+      rationaleWrap.classList.remove('hidden');
 
-      cardsEl.querySelectorAll('.asset-card').forEach(btn => {
+      // clicking a card switches the right-hand analysis
+      cardsEl.querySelectorAll('button[data-asset]').forEach(btn => {
         btn.addEventListener('click', () => showAsset(btn.dataset.asset, assets));
       });
     }
@@ -238,7 +252,7 @@
         (hr["1_year"]       ? statRow("1 Year", hr["1_year"]) : "") +
         (hr["5_years_avg"]  ? statRow("5 Years (Avg)", hr["5_years_avg"]) : "") +
         (hr["10_years_avg"] ? statRow("10 Years (Avg)", hr["10_years_avg"]) : "") ||
-        `<div class="text-slate-400 py-2">—</div>`;
+        `<div class="muted">—</div>`;
 
       const km = node.key_market_data || {};
       indEl.innerHTML = renderIndicators(km);
@@ -249,7 +263,7 @@
         (rm["max_drawdown"] ? statRow("Max Drawdown", rm["max_drawdown"]) : "") +
         (rm["sharpe_ratio"] ? statRow("Sharpe Ratio", rm["sharpe_ratio"]) : "") +
         (rm["var_95"]       ? statRow("VaR (95%)", rm["var_95"]) : "") ||
-        `<div class="text-slate-400 py-2">—</div>`;
+        `<div class="muted">—</div>`;
 
       assetExpl.textContent = node.explanation || '—';
       analysisEl.classList.remove('hidden');
