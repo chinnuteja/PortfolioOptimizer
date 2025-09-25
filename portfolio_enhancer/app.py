@@ -1,4 +1,4 @@
-# app.py — backend with robust caching + refresh + safe math + static serving
+# app.py — repo-level /static, robust caching + SWR + safe math + yfinance fallback
 
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
@@ -18,33 +18,37 @@ from portfolio_enhancer.api_client import AssetSentimentAPI
 
 load_dotenv()
 
-# Serve /static reliably; keep a fallback to root index.html if needed
-app = Flask(__name__, static_folder='static', static_url_path='/static')
-CORS(app)
+# ---------- paths & folders ----------
+REPO_ROOT = os.getcwd()                               # On Render: /opt/render/project/src
+STATIC_DIR = os.path.join(REPO_ROOT, "static")        # <— repo-level /static
+BASE_DIR   = REPO_ROOT
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s [%(name)s] %(message)s')
-logger = logging.getLogger(__name__)
-logger.info("STATIC FOLDER = %s", os.path.abspath(app.static_folder))
-
-asset_returns = None
-
-BASE_DIR = os.getcwd()
 EXPORT_DIR = os.path.join(BASE_DIR, "exports")
-CACHE_DIR = os.path.join(BASE_DIR, "cache")
+CACHE_DIR  = os.path.join(BASE_DIR, "cache")
 os.makedirs(EXPORT_DIR, exist_ok=True)
-os.makedirs(CACHE_DIR, exist_ok=True)
+os.makedirs(CACHE_DIR,  exist_ok=True)
 
 RETURNS_CACHE_PARQUET = os.path.join(CACHE_DIR, "asset_returns.parquet")
 RETURNS_CACHE_CSV     = os.path.join(CACHE_DIR, "asset_returns.csv")
 
+# Create Flask with repo-level /static
+app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="/static")
+CORS(app)
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s [%(name)s] %(message)s')
+logger = logging.getLogger(__name__)
+logger.info("STATIC FOLDER = %s", app.static_folder)
+
+asset_returns = None
+
 # --- refresh policy (hourly by default) ---
-RETURNS_MAX_AGE_SECONDS   = int(os.environ.get("RETURNS_MAX_AGE_SECONDS", "3600"))  # 1 hour
-STALE_WHILE_REVALIDATE    = os.environ.get("STALE_WHILE_REVALIDATE", "1") in ("1", "true", "True")
-FORCE_END_TODAY           = os.environ.get("FORCE_END_TODAY", "1") in ("1", "true", "True")
-# Optional hard cap (if cache older than this, block first request)
-RETURNS_HARD_MAX_AGE_SECONDS = int(os.environ.get("RETURNS_HARD_MAX_AGE_SECONDS", "0"))  # 0=disabled
+RETURNS_MAX_AGE_SECONDS     = int(os.environ.get("RETURNS_MAX_AGE_SECONDS", "3600"))  # 1 hour
+STALE_WHILE_REVALIDATE      = os.environ.get("STALE_WHILE_REVALIDATE", "1") in ("1", "true", "True")
+FORCE_END_TODAY             = os.environ.get("FORCE_END_TODAY", "1") in ("1", "true", "True")
+RETURNS_HARD_MAX_AGE_SECONDS= int(os.environ.get("RETURNS_HARD_MAX_AGE_SECONDS", "0"))  # 0=disabled
 
 _RETURNS_LOCK = threading.Lock()
+INIT_IN_PROGRESS = False
 
 # KPI throttling (reuse job for 10 min)
 KPI_JOB_TTL_SECONDS = int(os.environ.get("KPI_JOB_TTL_SECONDS", "600"))
@@ -67,7 +71,6 @@ PROFILE_POLICY = {
     "MaxRet":  {"anchor_strength": 0.10, "turnover_cap_pct": 35.0, "max_asset_cap_pct": 40.0},
 }
 
-INIT_IN_PROGRESS = False
 
 # ---------- helpers ----------
 
@@ -89,6 +92,7 @@ def _requests_session_with_retry(
     return s
 
 def _load_returns_cache() -> pd.DataFrame:
+    # Try parquet first (if pyarrow/fastparquet installed)
     if os.path.exists(RETURNS_CACHE_PARQUET):
         try:
             df = pd.read_parquet(RETURNS_CACHE_PARQUET)
@@ -97,6 +101,7 @@ def _load_returns_cache() -> pd.DataFrame:
                 return df
         except Exception as e:
             logger.warning("initialize_data(): parquet cache read failed: %s", e)
+    # Fallback to CSV
     if os.path.exists(RETURNS_CACHE_CSV):
         try:
             df = pd.read_csv(RETURNS_CACHE_CSV, index_col=0, parse_dates=True)
@@ -113,11 +118,11 @@ def _save_returns_cache(df: pd.DataFrame) -> None:
     try:
         df.to_parquet(RETURNS_CACHE_PARQUET, index=True)
     except Exception as e:
-        logger.warning("initialize_data(): cache parquet write failed: %s", e)
+        logger.warning("cache parquet write failed: %s", e)
     try:
         df.to_csv(RETURNS_CACHE_CSV, index=True)
     except Exception as e:
-        logger.warning("initialize_data(): cache csv write failed: %s", e)
+        logger.warning("cache csv write failed: %s", e)
 
 def _get_prices_with_retries(assets, sentiment_ticker, start_date, end_date, attempts=3, backoff=1.5):
     last_exc = None
@@ -132,7 +137,7 @@ def _get_prices_with_retries(assets, sentiment_ticker, start_date, end_date, att
     return data_fetcher._get_fallback_data(assets, sentiment_ticker, start_date, end_date)
 
 def _rolling_dates():
-    """Choose END_DATE = today (UTC) if FORCE_END_TODAY is set or config.END_DATE is None."""
+    """Use END_DATE=today (UTC) if FORCE_END_TODAY or config.END_DATE missing."""
     start_date = config.START_DATE
     if FORCE_END_TODAY or not getattr(config, "END_DATE", None):
         end_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -141,6 +146,7 @@ def _rolling_dates():
     return start_date, end_date
 
 def _cache_age_seconds() -> float:
+    """Age of the newest cache file; inf if no cache exists."""
     path = RETURNS_CACHE_PARQUET if os.path.exists(RETURNS_CACHE_PARQUET) else RETURNS_CACHE_CSV
     if not path or not os.path.exists(path):
         return float("inf")
@@ -157,9 +163,8 @@ def _refresh_returns_blocking() -> bool:
         t0 = time.time()
         try:
             start_date, end_date = _rolling_dates()
-            logger.info("refresh_returns(): START  range=%s→%s  cache_age=%s",
-                        start_date, end_date,
-                        "inf" if not math.isfinite(_cache_age_seconds()) else int(_cache_age_seconds()))
+            logger.info("refresh_returns(): START  range=%s→%s  cache_age=%.0fs",
+                        start_date, end_date, _cache_age_seconds())
             prices, _ = _get_prices_with_retries(
                 config.ASSETS, config.SENTIMENT_TICKER, start_date, end_date,
                 attempts=3, backoff=1.5
@@ -187,7 +192,7 @@ def _refresh_returns_blocking() -> bool:
 def maybe_refresh_returns_if_stale(blocking: bool = False):
     """Refresh policy:
        - If age < RETURNS_MAX_AGE_SECONDS: do nothing.
-       - If RETURNS_HARD_MAX_AGE_SECONDS > 0 and age >= HARD: block refresh.
+       - If HARD_MAX_AGE_SECONDS > 0 and age >= HARD: block refresh.
        - Else: refresh per blocking flag (SWR if False)."""
     age = _cache_age_seconds()
     if age < RETURNS_MAX_AGE_SECONDS:
@@ -198,8 +203,7 @@ def maybe_refresh_returns_if_stale(blocking: bool = False):
     if blocking:
         _refresh_returns_blocking()
     else:
-        t = threading.Thread(target=_refresh_returns_blocking, daemon=True)
-        t.start()
+        threading.Thread(target=_refresh_returns_blocking, daemon=True).start()
 
 def initialize_data():
     """Load cached returns or compute them once at startup."""
@@ -212,7 +216,6 @@ def initialize_data():
         cached = _load_returns_cache()
         if not cached.empty:
             asset_returns = cached
-            # If stale, refresh (background by default)
             if STALE_WHILE_REVALIDATE:
                 maybe_refresh_returns_if_stale(blocking=False)
             else:
@@ -246,7 +249,8 @@ def initialize_data():
     finally:
         INIT_IN_PROGRESS = False
 
-# Warmup
+
+# Warmup at import (gunicorn workers will each run this once)
 initialize_data()
 
 def _normalize_profile(p: str) -> str:
@@ -274,6 +278,7 @@ def project_to_caps_simplex(w: pd.Series, cap: pd.Series) -> pd.Series:
             room = capv.sum()
             if room > 0: wv = capv / room
         return pd.Series(wv, index=idx)
+    # total < 1 → distribute remainder
     rem  = 1.0 - total
     room = capv - wv
     mask = room > 1e-12
@@ -322,35 +327,36 @@ def _write_proposal_csv(filename, assets, current_pct, target_pct, proposed_pct,
                         proposed_pct.get(a, 0), trades_pct.get(a, 0)])
     return path
 
+
 # ---------- routes ----------
 
-@app.route('/')
+@app.route("/")
 def index():
-    """
-    Serve index from /static if present, else 404 with hint.
-    """
-    static_index = os.path.join(app.static_folder, 'index.html')
-    if os.path.exists(static_index):
-        return app.send_static_file('index.html')
-    # fallback for older setups: if index at project root, serve it
-    root_index = os.path.join(BASE_DIR, 'index.html')
-    if os.path.exists(root_index):
-        return send_from_directory(BASE_DIR, 'index.html')
-    return jsonify({"error":"index_not_found","message":"Place index.html under the /static folder."}), 404
+    """Serve /static/index.html, or a clear error if missing."""
+    index_path = os.path.join(app.static_folder, "index.html")
+    if os.path.exists(index_path):
+        return send_from_directory(app.static_folder, "index.html")
+    return jsonify({
+        "error": "index_not_found",
+        "message": "Place index.html under the /static folder.",
+        "looked_in": app.static_folder
+    }), 404
+
+@app.route("/explain.html")
+def explain_html():
+    """Serve /static/explain.html explicitly."""
+    path = os.path.join(app.static_folder, "explain.html")
+    if os.path.exists(path):
+        return send_from_directory(app.static_folder, "explain.html")
+    return jsonify({
+        "error": "explain_not_found",
+        "message": "Place explain.html under the /static folder.",
+        "looked_in": app.static_folder
+    }), 404
 
 @app.route('/health')
 def health():
-    latest = None
-    try:
-        latest = str(asset_returns.index.max()) if asset_returns is not None and not asset_returns.empty else None
-    except Exception:
-        latest = None
-    return jsonify({
-        "status": "ok",
-        "assets_loaded": asset_returns is not None and not asset_returns.empty,
-        "latest_date": latest,
-        "cache_age_seconds": None if not math.isfinite(_cache_age_seconds()) else int(_cache_age_seconds())
-    })
+    return jsonify({"status":"ok", "assets_loaded": asset_returns is not None and not asset_returns.empty})
 
 @app.route('/download/<path:filename>')
 def download(filename):
@@ -364,25 +370,20 @@ def get_portfolio():
     """
     global asset_returns, LATEST_KPIS_JOB_ID, LATEST_KPIS_JOB_STARTED_AT
 
-    # Ensure data present (try init once if missing)
+    # Ensure data present
     if asset_returns is None or getattr(asset_returns, "empty", True):
         initialize_data()
+    if asset_returns is None or getattr(asset_returns, "empty", True):
+        return jsonify({"error":"Historical data not loaded. Please retry shortly."}), 503, {
+            "Retry-After": "3"
+        }
 
-    # SAFE cache age handling (don't cast inf to int)
-    age = _cache_age_seconds()  # float (seconds) or inf
-    age_str = "inf" if not math.isfinite(age) else str(int(age))
-    swr_flag = "1" if STALE_WHILE_REVALIDATE else "0"
-    hard_cap_str = str(RETURNS_HARD_MAX_AGE_SECONDS or "disabled")
-    logger.info("get_portfolio(): cache_age=%ss  swr=%s  hard_cap=%s", age_str, swr_flag, hard_cap_str)
+    # Log cache age & apply refresh policy (guard against inf)
+    age_val = _cache_age_seconds()
+    age_sec = int(age_val) if math.isfinite(age_val) else -1
+    logger.info("get_portfolio(): cache_age=%ss  swr=%s  hard_cap=%s",
+                age_sec, STALE_WHILE_REVALIDATE, RETURNS_HARD_MAX_AGE_SECONDS or "disabled")
 
-    # If we have no cache or still empty → blocking refresh now
-    if (asset_returns is None or getattr(asset_returns, "empty", True)) or not math.isfinite(age):
-        logger.info("get_portfolio(): no cache / empty returns → blocking refresh now")
-        ok = _refresh_returns_blocking()
-        if not ok or asset_returns is None or getattr(asset_returns, "empty", True):
-            return jsonify({"error":"Historical data not loaded. Please retry shortly."}), 503, {"Retry-After": "3"}
-
-    # Apply refresh policy for normal cases
     if STALE_WHILE_REVALIDATE:
         maybe_refresh_returns_if_stale(blocking=False)
     else:
@@ -515,10 +516,10 @@ def get_portfolio():
     }
 
     resp = jsonify(response)
-    # Freshness/debug headers (robust to inf)
+    # Freshness/debug headers
     try:
-        age = _cache_age_seconds()
-        resp.headers["X-Returns-Cache-Age-Seconds"] = "inf" if not math.isfinite(age) else str(int(age))
+        age_dbg = _cache_age_seconds()
+        resp.headers["X-Returns-Cache-Age-Seconds"] = str(int(age_dbg)) if math.isfinite(age_dbg) else "inf"
         resp.headers["X-Returns-SWR"] = "1" if STALE_WHILE_REVALIDATE else "0"
         resp.headers["X-Returns-Latest-Date"] = str(asset_returns.index.max())
     except Exception:
@@ -594,8 +595,9 @@ def explain():
         logger.exception("explain(): relay failed: %s", e)
         return jsonify({"status":"error","error":"relay_failed"}), 200
 
+
 if __name__ == "__main__":
-    # Local runs: keep reloader off by default (Windows flakiness).
+    # Local runs: optional debug and reloader control via env
     port = int(os.environ.get("PORT", 5000))
     debug_env = os.environ.get("FLASK_DEBUG", "0") in ("1", "true", "True")
     disable_reloader = os.environ.get("DISABLE_RELOADER", "1") in ("1", "true", "True")
